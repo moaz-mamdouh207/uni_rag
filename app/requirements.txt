@@ -1,0 +1,46 @@
+#_____________________________Main app______________________________
+fastapi[standard]==0.128.0
+python-magic==0.4.27
+aiofiles==25.1.0
+
+langchain==1.2.10
+langchain-community==0.4.1
+langchain-openai==1.1.10
+langchain-google-genai==4.2.1
+
+pypdf==6.9.2
+
+
+#_____________________________authentication______________________________
+python-jose==3.5.0
+passlib==1.7.4
+
+
+#_____________________________Task Queue and Background Processing______________________________
+celery==5.5.3
+redis==6.2.0
+
+
+#_____________________________Relational DB______________________________
+SQLAlchemy==2.0.46
+psycopg2==2.9.11
+asyncpg==0.31.0
+alembic==1.18.4
+
+#_____________________________Vector DB______________________________
+qdrant-client==1.17.0
+
+pgvector==0.4.2
+
+
+
+
+
+PyMuPDF==1.27.2.3
+pillow==12.2.0
+
+sympy==1.14.0
+
+ragas>=0.2.0
+datasets
+
