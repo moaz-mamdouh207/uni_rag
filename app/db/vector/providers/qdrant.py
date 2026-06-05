@@ -48,23 +48,33 @@ class QdrantSyncProvider(SyncVectorDBRepository):
         ]
         self._client.upsert(collection_name=self._collection, points=points, wait=True)
 
-    
+
     def scroll(
         self, 
+        user_id: UUID,
+        course_id: UUID,
         limit: int = 10, 
         with_payload: bool = True, 
         with_vectors: bool = False
     ) -> list[SearchResult]:
         """
-        Scrolls through the collection and returns a chunk of records.
-        To simulate randomness efficiently, it attempts to skip to a random offset 
-        based on the total number of points in the collection.
+        Scrolls through the collection with hard user + course filters 
+        and returns a chunk of records.
         """
-        # 1. Get the total count of points to calculate a random offset
         candidate_pool_size = max(100, limit * 3)
+        
+        # Define Qdrant filter for metadata
+        # Adjust "user_id" or "metadata.user_id" depending on how your payload is structured
+        qdrant_filter = Filter(
+            must=[
+                FieldCondition(key="user_id", match=MatchValue(value=str(user_id))),
+                FieldCondition(key="course_id", match=MatchValue(value=str(course_id)))
+            ]
+        )
         
         records, _ = self._client.scroll(
             collection_name=self._collection,
+            scroll_filter=qdrant_filter,  # Inject the filter here
             limit=candidate_pool_size,
             with_payload=with_payload,
             with_vectors=with_vectors,
@@ -86,8 +96,6 @@ class QdrantSyncProvider(SyncVectorDBRepository):
             )
             for record in records
         ]
-
-
 
 # ---------------------------------------------------------------------------
 # Async provider  →  FastAPI

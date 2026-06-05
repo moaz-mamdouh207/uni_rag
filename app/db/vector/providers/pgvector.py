@@ -146,16 +146,32 @@ class PgVectorSyncProvider(SyncVectorDBRepository):
         with self._session_factory() as session:
             session.execute(stmt)
             session.commit()
-
+\
     def scroll(
         self,
+        user_id: UUID,
+        course_id: UUID,
         limit: int = 10,
-        with_payload: bool = True,
+        with_payload: bool = True,  # Kept for signature uniformity, though not strictly used here
         with_vectors: bool = False,
     ) -> list[SearchResult]:
+        """
+        Scrolls through the pgvector SQL table randomly, filtered strictly by user + course.
+        """
         from sqlalchemy import func
         with self._session_factory() as session:
-            stmt = select(self._model).order_by(func.random()).limit(limit)
+            # 1. Base statement selecting the model rows
+            stmt = select(self._model)
+            
+            # 2. Extract and match JSONB keys from the metadata column
+            stmt = stmt.where(
+                self._model.metadata['user_id'].as_string() == str(user_id),
+                self._model.metadata['course_id'].as_string() == str(course_id)
+            )
+            
+            # 3. Apply random ordering and limit
+            stmt = stmt.order_by(func.random()).limit(limit)
+            
             rows = session.scalars(stmt).all()
 
         return [

@@ -25,7 +25,9 @@ class SyncVectorDBRepository(ABC):
 
     @abstractmethod
     def scroll(
-        self, 
+        self,
+        user_id: UUID,
+        course_id: UUID,
         limit: int = 10, 
         with_payload: bool = True, 
         with_vectors: bool = False
