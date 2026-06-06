@@ -1,15 +1,3 @@
-"""
-ChatService — orchestrates all chat functionality.
-
-Two paths in chat():
-  PATH A (files attached) → AgentLoop
-      The LLM drives the reasoning: it calls extract_file(), retrieve(),
-      calculate(), clarify_question(), and finish() in whatever order it
-      decides. The service just starts the loop and waits for finish().
-
-  PATH B (text only) → existing single-pass RAG
-      Unchanged from the original implementation.
-"""
 from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
@@ -17,27 +5,26 @@ from uuid import UUID
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from modules.chat.file_processor import FileProcessor
 from db.relational.schemas import ConversationCreate, MessageCreate
 from db.relational.models.conversation import Conversation
 from db.relational.constants import MessageRole
-from db.vector.schemas import SearchQuery
 
 from modules.chat.schemas import (
     ChatRequest,
     ChatResponse,
+    CitedSource,
     ConversationHistoryResponse,
     ConversationMetadata,
+    FileExtractionResult,
 )
+from shared.tracing import observe
 
 if TYPE_CHECKING:
     from modules.chat.config import ChatSettings
     from db.relational.repositories.conversation_repository import AsyncConversationRepository
     from db.relational.repositories.message_repository import AsyncMessageRepository
     from modules.chat.conversation import ConversationManager
-    from modules.chat.prompt_builder import PromptBuilder
-    from modules.chat.agent.loop import AgentLoop
-    from modules.retrieval.service import RetrievalService
-    from shared.llm.client import LLMClient
     from db.relational.schemas import ConversationUpdate
 
 logger = logging.getLogger(__name__)
@@ -48,24 +35,20 @@ class ChatService:
         self,
         conversation_repo:   AsyncConversationRepository,
         message_repo:        AsyncMessageRepository,
-        retrieval_service:   RetrievalService,
         convesation_manager: ConversationManager,
-        prompt_builder:      PromptBuilder,
-        llm_client:          LLMClient,
+        file_processor:      FileProcessor,
         settings:            ChatSettings,
-        agent_loop_factory,  # callable(user_id, course_id, documents_ids) -> AgentLoop
+        agent_loop_factory,
     ):
         self._conv_repo          = conversation_repo
         self._message_repo       = message_repo
-        self._retrieval          = retrieval_service
         self._conv_manager       = convesation_manager
-        self._llm                = llm_client
-        self._prompt             = prompt_builder
+        self._file_processor     = file_processor
         self._settings           = settings
         self._agent_loop_factory = agent_loop_factory
 
     # ------------------------------------------------------------------
-    # Conversation CRUD (unchanged)
+    # Conversation CRUD
     # ------------------------------------------------------------------
 
     async def add_conversation(self, data: ConversationCreate, user_id: UUID) -> ConversationMetadata:
@@ -91,22 +74,35 @@ class ChatService:
         raw_history     = await self._message_repo.get_all_by_conversation(conv.id)
         trimmed_history = self._conv_manager.trim_history(raw_history)
 
+        # ── File extraction — traced with full content preview ────────────
+        extracted_files: list[FileExtractionResult] = []
         if request.files:
-            answer, prompt_tokens, completion_tokens = await self._agentic_chat(
-                request=request,
-                conv=conv,
-                history=trimmed_history,
-            )
-            prompt_repr = f"[agentic loop — {len(request.files)} file(s) attached]"
-        else:
-            answer, messages, prompt_tokens, completion_tokens = await self._standard_chat(
-                request=request,
-                conv=conv,
-                history=trimmed_history,
-            )
-            prompt_repr = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+            with observe(
+                name="file_extraction",
+                input={"file_ids": [str(f) for f in request.files]},
+            ) as span:
+                extracted_files = await self._file_processor.process(request.files, request.query)
+                await self._file_processor.cleanup(request.files)
+                span.update(output={
+                    "files": [
+                        {
+                            "id":              str(f.file_id),
+                            "type":            str(f.file_type),
+                            "chars":           len(f.markdown_content),
+                            "has_content":     f.markdown_content != "NO_ITEMS_FOUND",
+                            "content_preview": f.markdown_content[:5000],
+                        }
+                        for f in extracted_files
+                    ]
+                })
 
-        # Persist both turns
+        answer, sources, prompt_tokens, completion_tokens = await self._run_agent(
+            request=request,
+            conv=conv,
+            history=trimmed_history,
+            extracted_files=extracted_files,
+        )
+
         await self._message_repo.add(
             data=MessageCreate(
                 role=MessageRole.user,
@@ -125,8 +121,8 @@ class ChatService:
         )
 
         return ChatResponse(
-            prompt=prompt_repr,
             answer=answer,
+            sources=sources,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
@@ -140,77 +136,37 @@ class ChatService:
         )
 
     # ------------------------------------------------------------------
-    # Private — PATH A: agentic
+    # Private
     # ------------------------------------------------------------------
 
-    async def _agentic_chat(
+    async def _run_agent(
         self,
-        request: ChatRequest,
-        conv:    Conversation,
-        history: list,
-    ) -> tuple[str, int | None, int | None]:
+        request:         ChatRequest,
+        conv:            Conversation,
+        history:         list,
+        extracted_files: list[FileExtractionResult] | None = None,
+    ) -> tuple[str, list[CitedSource], int | None, int | None]:
         agent_loop = self._agent_loop_factory(
             user_id=conv.user_id,
             course_id=conv.meta.course_id,
             documents_ids=conv.meta.documents_ids,
         )
 
-        lc_history = self._orm_history_to_lc(history)
-
         result = await agent_loop.run(
             user_query=request.query,
-            file_ids=request.files,
-            history=lc_history,
+            extracted_files=extracted_files,
+            history=self._orm_history_to_lc(history),
+            trace_metadata={
+                "conversation_id": str(conv.id),
+                "user_id":         str(conv.user_id),
+                "course_id":       str(conv.meta.course_id),
+            },
         )
 
         if result.hit_limit:
-            logger.warning(
-                "ChatService: agent hit iteration limit for conv %s", conv.id
-            )
+            logger.warning("ChatService: agent hit iteration limit for conv %s", conv.id)
 
-        return result.answer, None, None
-
-    # ------------------------------------------------------------------
-    # Private — PATH B: standard single-pass RAG
-    # ------------------------------------------------------------------
-
-    async def _standard_chat(
-        self,
-        request: ChatRequest,
-        conv:    Conversation,
-        history: list,
-    ) -> tuple[str, list, int | None, int | None]:
-        search_query = SearchQuery(
-            query=request.query,
-            top_k=self._settings.top_k,
-            score_threshold=self._settings.score_threshold,
-            rerank=self._settings.rerank,
-        )
-        response = await self._retrieval.retrieve(
-            request=search_query,
-            user_id=conv.user_id,
-            course_id=conv.meta.course_id,
-            documents_ids=conv.meta.documents_ids,
-        )
-
-        messages = self._prompt.build(
-            user_message=request.query,
-            history=history,
-            chunks=response.results,
-        )
-
-        llm_result = await self._llm.complete(messages)
-
-        return (
-            llm_result.content,
-            messages,
-            getattr(llm_result.usage, "prompt_tokens", None),
-            getattr(llm_result.usage, "completion_tokens", None),
-        )
-
-    # ------------------------------------------------------------------
-    # Private — helpers
-    # ------------------------------------------------------------------
+        return result.answer, result.cited_sources, None, None
 
     @staticmethod
     def _orm_history_to_lc(history: list) -> list[BaseMessage]:

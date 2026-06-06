@@ -1,37 +1,10 @@
-"""
-AgentLoop — the agentic reasoning loop for the engineering RAG tutor.
-
-Architecture:
-  - Uses LangChain's bind_tools() with ChatGoogleGenerativeAI for native
-    Gemini function calling. The LLM decides which tools to call and when.
-  - Runs until the LLM calls finish() or max_iterations is reached.
-  - Tool calls within a single iteration are executed in parallel where
-    possible (multiple tool calls in one LLM response).
-  - The full message history is maintained and passed on every iteration
-    so the LLM has complete context of everything it has done so far.
-  - A safe partial-answer fallback is returned if the loop hits the
-    iteration cap without calling finish().
-
-Message history shape:
-    [SystemMessage]
-    [HumanMessage]           ← user query + file_ids injected
-    [AIMessage(tool_calls)]  ← LLM decides to call tools
-    [ToolMessage(result)]    ← tool output injected back
-    [AIMessage(tool_calls)]  ← LLM calls more tools or finish()
-    ...
-
-LLMClient extension:
-  This module uses self._build_llm_with_tools() which calls bind_tools()
-  on the underlying ChatGoogleGenerativeAI instance. The existing
-  LLMClient.complete() path is untouched — this is additive.
-"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from langchain_core.messages import (
     AIMessage,
@@ -44,38 +17,21 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 
 from modules.chat.agent.prompts import ENGINEERING_AGENT_SYSTEM_PROMPT
-from modules.chat.agent.tool_schemas import FinishOutput
 from modules.chat.agent.tools import AgentTools
+from modules.chat.schemas import CitedSource
+from shared.tracing import observe, observe_generation, set_trace_attributes
 
 if TYPE_CHECKING:
-    from modules.chat.agent.tool_schemas import (
-        ExtractFileInput,
-        RetrieveInput,
-        RetrieveMultiInput,
-        CalculateInput,
-        ClarifyQuestionInput,
-        FinishInput,
-    )
+    from modules.chat.schemas import FileExtractionResult
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# LangChain tool definitions — used with bind_tools()
-# These tell Gemini the name, description, and parameter schema of each tool.
+# LangChain tool stubs
 # ---------------------------------------------------------------------------
 
 from langchain_core.tools import tool as lc_tool
-
-
-@lc_tool
-def extract_file(file_id: str) -> str:
-    """
-    Extract all questions and numbered items from an attached file (PDF or image).
-    Call this FIRST for every file_id in the user's message before doing anything else.
-    Returns structured markdown with every item exactly as numbered in the file.
-    """
-    ...  # never actually called — AgentTools.execute() handles execution
 
 
 @lc_tool
@@ -85,6 +41,7 @@ def retrieve(query: str, context_hint: str | None = None) -> str:
     Use for targeted lookup of one specific piece of engineering knowledge.
     context_hint should be the specific engineering sub-field e.g. 'beam bending',
     'Bernoulli equation', 'Mohr circle stress'. Always provide it when you know it.
+    # execution: AgentTools._retrieve
     """
     ...
 
@@ -96,6 +53,7 @@ def retrieve_multi(queries: list[dict]) -> str:
     queries is a list of objects each with 'query' (required) and 'context_hint' (optional).
     Use when you already know you need context for several different questions at once.
     More efficient than calling retrieve() repeatedly.
+    # execution: AgentTools._retrieve_multi
     """
     ...
 
@@ -105,15 +63,16 @@ def calculate(expression: str) -> str:
     """
     Evaluate a mathematical expression with full precision using a symbolic math engine.
     Supports arithmetic, algebra, trigonometry, logarithms, square roots, and equation solving.
-    
-    Examples:
-      arithmetic:  (15 * 6**2) / 8
-      sqrt:        sqrt(144)
-      trig:        sin(pi/4)
-      solve:       solve(x**2 - 4, x)
-    
+
+    Single expression:       (15 * 6**2) / 8
+    Square root:             sqrt(144)
+    Trig:                    sin(pi/4)
+    Solve equation:          solve(x**2 - 4, x)
+    Multi-step (semicolons): z = 1/sqrt(2); w = z * 3; [z, w]
+
     Always use ** for exponentiation, not ^.
     Always call this for any numerical computation — never compute in your head.
+    # execution: AgentTools._calculate
     """
     ...
 
@@ -126,6 +85,7 @@ def clarify_question(original_text: str, interpretation: str) -> str:
     Call this BEFORE retrieving or calculating for that question.
     original_text: the ambiguous question text verbatim.
     interpretation: your interpretation including any dependency assumptions.
+    # execution: AgentTools._clarify_question
     """
     ...
 
@@ -136,41 +96,40 @@ def finish(answer: str) -> str:
     Deliver the final answer to the user and end the loop.
     Call this only when you have retrieved all necessary context and completed
     all calculations. This is the ONLY way to return a response to the user.
-    Format: number answers to match question numbering, show formulas and
-    working, state units explicitly in every final answer.
+    RESPONSE STYLE
+    - Each equation gets its own line with blank lines before and after.
+    - Each step opens with one sentence of intent, then shows the math.
+    - Numerical results are always on their own line: "Result: ζ = 0.303"
+    - Use bold for final answers: **ζ = 0.303**
+    - Never write "substituting x=1 into F=ma we get F=1" — break it into three lines.
+    # execution: terminates loop, answer returned to user
     """
     ...
 
 
-ALL_LC_TOOLS = [extract_file, retrieve, retrieve_multi, calculate, clarify_question, finish]
+ALL_LC_TOOLS = [retrieve, retrieve_multi, calculate, clarify_question, finish]
+
+
+# ---------------------------------------------------------------------------
+# Result model
+# ---------------------------------------------------------------------------
+
+class AgentLoopResult(BaseModel):
+    answer:        str
+    iterations:    int
+    hit_limit:     bool = False
+    cited_sources: list[CitedSource] = []
 
 
 # ---------------------------------------------------------------------------
 # AgentLoop
 # ---------------------------------------------------------------------------
 
-class AgentLoopResult(BaseModel):
-    answer:      str
-    iterations:  int
-    hit_limit:   bool = False
-
-
 class AgentLoop:
-    """
-    Runs the agentic reasoning loop for a single chat turn.
-
-    Args:
-        llm:        The raw ChatGoogleGenerativeAI instance from LLMClient.
-                    We bind tools directly on it here — LLMClient.complete()
-                    is untouched.
-        tools:      AgentTools instance pre-configured with user/course scope.
-        settings:   ChatSettings — provides max_agent_iterations.
-    """
-
     def __init__(
         self,
-        llm:      ChatGoogleGenerativeAI,
-        tools:    AgentTools,
+        llm:            ChatGoogleGenerativeAI,
+        tools:          AgentTools,
         max_iterations: int = 10,
     ) -> None:
         self._llm_with_tools = llm.bind_tools(ALL_LC_TOOLS)
@@ -183,67 +142,170 @@ class AgentLoop:
 
     async def run(
         self,
-        user_query: str,
-        file_ids:   list[UUID] | None = None,
-        history:    list[BaseMessage] | None = None,
+        user_query:      str,
+        extracted_files: list[FileExtractionResult] | None = None,
+        history:         list[BaseMessage] | None = None,
+        trace_metadata:  dict | None = None,
     ) -> AgentLoopResult:
-        """
-        Execute the agent loop for one chat turn.
+        turn_start = time.perf_counter()
+        tool_call_counts: dict[str, int] = {}
 
-        Args:
-            user_query: The user's text query.
-            file_ids:   UUIDs of attached files (injected into the first message).
-            history:    Trimmed conversation history as LangChain messages.
+        with observe(
+            name="agent_turn",
+            input={
+                "query":            user_query,
+                "files_count":      len(extracted_files or []),
+                "history_messages": len(history or []),
+            },
+            metadata={
+                "max_iterations": self._max_iterations,
+                **(trace_metadata or {}),
+            },
+        ) as turn_span:
 
-        Returns:
-            AgentLoopResult with the final answer and loop metadata.
-        """
-        messages = self._build_initial_messages(user_query, file_ids, history)
-        
-        iterations = 0
-
-        while iterations < self._max_iterations:
-            iterations += 1
-            logger.debug("AgentLoop: iteration %d / %d", iterations, self._max_iterations)
-
-            # LLM decides next action(s)
-            response: AIMessage = await self._llm_with_tools.ainvoke(messages)
-            messages.append(response)
-
-            # No tool calls → LLM gave a direct response (shouldn't happen
-            # given the prompt, but handle it gracefully)
-            if not response.tool_calls:
-                logger.warning(
-                    "AgentLoop: LLM responded without tool calls at iteration %d",
-                    iterations,
-                )
-                text = response.content if isinstance(response.content, str) else ""
-                return AgentLoopResult(
-                    answer=text or "I was unable to produce an answer.",
-                    iterations=iterations,
+            if trace_metadata:
+                set_trace_attributes(
+                    user_id=trace_metadata.get("user_id"),
+                    session_id=trace_metadata.get("conversation_id"),
+                    metadata=trace_metadata,
                 )
 
-            # Check if finish() is among the tool calls — extract answer first
-            finish_call = self._find_finish_call(response.tool_calls) # type: ignore
-            if finish_call:
-                answer = finish_call.get("args", {}).get("answer", "")
-                logger.debug("AgentLoop: finish() called after %d iterations", iterations)
-                return AgentLoopResult(answer=answer, iterations=iterations)
+            messages = self._build_initial_messages(user_query, extracted_files, history)
+            iterations = 0
 
-            # Execute all tool calls in this response in parallel
-            tool_messages = await self._execute_tool_calls(response.tool_calls) # type: ignore
-            messages.extend(tool_messages)
+            while iterations < self._max_iterations:
+                iterations += 1
+                logger.debug("AgentLoop: iteration %d / %d", iterations, self._max_iterations)
 
-        # Hit iteration cap — try to extract a partial answer from history
-        logger.warning(
-            "AgentLoop: hit max_iterations (%d) without finish()", self._max_iterations
-        )
-        partial = self._extract_partial_answer(messages)
-        return AgentLoopResult(
-            answer=partial,
-            iterations=iterations,
-            hit_limit=True,
-        )
+                # ── LLM call — log the full prompt and the tool calls back ──
+                with observe_generation(
+                    name=f"llm_call_iter_{iterations}",
+                    input={
+                        # Full prompt sent to the model this iteration.
+                        # Each message truncated at 500 chars to keep payload readable
+                        # while still showing the actual content.
+                        "messages": [
+                            {
+                                "role":    _msg_role(m),
+                                "content": _msg_content(m)[:5000],
+                            }
+                            for m in messages
+                        ]
+                    },
+                    metadata={"iteration": iterations},
+                ) as llm_gen:
+                    t_llm = time.perf_counter()
+                    response: AIMessage = await self._llm_with_tools.ainvoke(messages)
+
+                    usage = getattr(response, "usage_metadata", None) or {}
+                    requested_tools = [tc.get("name") for tc in (response.tool_calls or [])]
+
+                    llm_gen.update(
+                        output={
+                            "tool_calls_requested": requested_tools,
+                            "tool_calls_count":     len(requested_tools),
+                            "has_finish":           AgentTools.FINISH in requested_tools,
+                            # Include any direct text content (shouldn't happen
+                            # normally but useful to see when it does)
+                            "text_content": (
+                                response.content[:300]
+                                if isinstance(response.content, str) and response.content.strip()
+                                else None
+                            ),
+                        },
+                        usage={
+                            "input":  usage.get("input_tokens"),
+                            "output": usage.get("output_tokens"),
+                        },
+                        metadata={
+                            "iteration":   iterations,
+                            "duration_ms": int((time.perf_counter() - t_llm) * 1000),
+                        },
+                    )
+
+                messages.append(response)
+
+                for name in requested_tools:
+                    tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+
+                # ── No tool calls ─────────────────────────────────────────
+                if not response.tool_calls:
+                    logger.warning(
+                        "AgentLoop: LLM responded without tool calls at iteration %d", iterations
+                    )
+                    text = response.content if isinstance(response.content, str) else ""
+                    result = AgentLoopResult(
+                        answer=text or "I was unable to produce an answer.",
+                        iterations=iterations,
+                        cited_sources=self._tools.collect_cited_sources(),
+                    )
+                    turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "no_tool_calls"))
+                    return result
+
+                # ── finish() detected ─────────────────────────────────────
+                finish_call = self._find_finish_call(response.tool_calls)  # type: ignore
+                if finish_call:
+                    other_calls = [
+                        tc for tc in response.tool_calls  # type: ignore
+                        if tc.get("name") != AgentTools.FINISH
+                    ]
+                    if other_calls:
+                        logger.warning(
+                            "AgentLoop: LLM called finish() alongside %d other tool(s) "
+                            "at iteration %d — the other calls will be dropped.",
+                            len(other_calls), iterations,
+                        )
+                    answer = finish_call.get("args", {}).get("answer", "")
+                    logger.debug("AgentLoop: finish() called after %d iterations", iterations)
+                    result = AgentLoopResult(
+                        answer=answer,
+                        iterations=iterations,
+                        cited_sources=self._tools.collect_cited_sources(),
+                    )
+                    turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "finish"))
+                    return result
+
+                # ── Execute tool calls ────────────────────────────────────
+                tool_messages = await self._execute_tool_calls(response.tool_calls)  # type: ignore
+                messages.extend(tool_messages)
+
+            # ── Hit iteration cap ─────────────────────────────────────────
+            logger.warning("AgentLoop: hit max_iterations (%d) without finish()", self._max_iterations)
+            partial = self._extract_partial_answer(messages)
+            result = AgentLoopResult(
+                answer=partial,
+                iterations=iterations,
+                hit_limit=True,
+                cited_sources=self._tools.collect_cited_sources(),
+            )
+            turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "hit_limit"))
+            return result
+
+    # ------------------------------------------------------------------
+    # Private — trace output helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _turn_output(
+        result:             AgentLoopResult,
+        tool_call_counts:   dict[str, int],
+        turn_start:         float,
+        termination_reason: str,
+    ) -> dict:
+        return {
+            # Full answer — not a preview — so you can read the complete
+            # response in Langfuse without going to the app
+            "output": {"answer": result.answer},
+            "metadata": {
+                "iterations":           result.iterations,
+                "hit_limit":            result.hit_limit,
+                "termination_reason":   termination_reason,
+                "total_duration_ms":    int((time.perf_counter() - turn_start) * 1000),
+                "tool_call_counts":     tool_call_counts,
+                "total_tool_calls":     sum(tool_call_counts.values()),
+                "sources_count":        len(result.cited_sources),
+            },
+        }
 
     # ------------------------------------------------------------------
     # Private — message construction
@@ -251,37 +313,33 @@ class AgentLoop:
 
     def _build_initial_messages(
         self,
-        user_query: str,
-        file_ids:   list[UUID] | None,
-        history:    list[BaseMessage] | None,
+        user_query:      str,
+        extracted_files: list[FileExtractionResult] | None,
+        history:         list[BaseMessage] | None,
     ) -> list[BaseMessage]:
-        messages: list[BaseMessage] = []
-
-        # System prompt
-        messages.append(SystemMessage(content=ENGINEERING_AGENT_SYSTEM_PROMPT))
-
-        # Conversation history (already trimmed by ConversationManager)
+        messages: list[BaseMessage] = [SystemMessage(content=ENGINEERING_AGENT_SYSTEM_PROMPT)]
         if history:
             messages.extend(history)
-
-        # Current user turn — inject file_ids explicitly so the LLM
-        # knows to call extract_file() for each one
-        user_content = self._build_user_content(user_query, file_ids)
-        messages.append(HumanMessage(content=user_content))
-
+        messages.append(HumanMessage(content=self._build_user_content(user_query, extracted_files)))
         return messages
 
     @staticmethod
-    def _build_user_content(user_query: str, file_ids: list[UUID] | None) -> str:
-        if not file_ids:
+    def _build_user_content(
+        user_query:      str,
+        extracted_files: list[FileExtractionResult] | None,
+    ) -> str:
+        if not extracted_files:
             return user_query
 
-        ids_block = "\n".join(f"  - {fid}" for fid in file_ids)
-        return (
-            f"{user_query}\n\n"
-            f"Attached files (call extract_file for each before doing anything else):\n"
-            f"{ids_block}"
+        files_block = "\n\n".join(
+            f"--- File {i+1} (id: {str(r.file_id)}) ---\n{r.markdown_content}"
+            for i, r in enumerate(extracted_files)
+            if r.markdown_content != "NO_ITEMS_FOUND"
         )
+        if not files_block:
+            return user_query
+
+        return f"{user_query}\n\n### Extracted content of the attached files\n{files_block}"
 
     # ------------------------------------------------------------------
     # Private — tool execution
@@ -291,27 +349,16 @@ class AgentLoop:
         self,
         tool_calls: list[dict[str, Any]],
     ) -> list[ToolMessage]:
-        """
-        Execute all tool calls from one LLM response in parallel.
-        Returns a list of ToolMessage objects to append to history.
-        """
         async def _run_one(tc: dict[str, Any]) -> ToolMessage:
-            tool_name = tc["name"]
-            tool_args = tc.get("args", {})
-            tool_id   = tc.get("id", tool_name)
-
+            tool_name   = tc["name"]
+            tool_args   = tc.get("args", {})
+            tool_id     = tc.get("id", tool_name)
             result_json = await self._tools.execute(tool_name, tool_args)
-
             logger.debug(
                 "AgentLoop: tool=%s id=%s result_len=%d",
                 tool_name, tool_id, len(result_json),
             )
-
-            return ToolMessage(
-                content=result_json,
-                tool_call_id=tool_id,
-                name=tool_name,
-            )
+            return ToolMessage(content=result_json, tool_call_id=tool_id, name=tool_name)
 
         results = await asyncio.gather(
             *[_run_one(tc) for tc in tool_calls],
@@ -339,7 +386,6 @@ class AgentLoop:
 
     @staticmethod
     def _find_finish_call(tool_calls: list[dict[str, Any]]) -> dict | None:
-        """Return the finish() tool call dict if present, else None."""
         for tc in tool_calls:
             if tc.get("name") == AgentTools.FINISH:
                 return tc
@@ -347,19 +393,34 @@ class AgentLoop:
 
     @staticmethod
     def _extract_partial_answer(messages: list[BaseMessage]) -> str:
-        """
-        Fallback: scan message history in reverse for any substantive
-        AI text content when the loop hits the iteration cap.
-        """
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 content = msg.content
                 if isinstance(content, str) and len(content.strip()) > 20:
                     return (
-                        f"[Note: the agent reached its reasoning limit. "
-                        f"Partial response below.]\n\n{content.strip()}"
+                        "[Note: the agent reached its reasoning limit. "
+                        "Partial response below.]\n\n" + content.strip()
                     )
         return (
-            "I was unable to complete the answer within the allowed number "
-            "of reasoning steps. Please try with a more specific question."
+            "I was unable to complete the answer within the allowed number of "
+            "reasoning steps. Please try with a more specific question."
         )
+
+
+# ---------------------------------------------------------------------------
+# Message helpers
+# ---------------------------------------------------------------------------
+
+def _msg_role(msg: BaseMessage) -> str:
+    if isinstance(msg, SystemMessage): return "system"
+    if isinstance(msg, HumanMessage):  return "user"
+    if isinstance(msg, AIMessage):     return "assistant"
+    if isinstance(msg, ToolMessage):   return "tool"
+    return "unknown"
+
+
+def _msg_content(msg: BaseMessage) -> str:
+    if isinstance(msg.content, str):
+        return msg.content
+    # AIMessage with tool_calls has content as a list of dicts
+    return json.dumps(msg.content)

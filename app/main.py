@@ -8,6 +8,7 @@ from modules.ingestion.router import ingestion_router
 from modules.chat.router import chat_router
 
 from db.vector.factory import get_async_vector_repo
+from shared.tracing import flush_traces
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,7 +17,7 @@ async def lifespan(app: FastAPI):
     await vector_repo.ensure_collection()
 
     yield
-    # Executed before shutown
+    flush_traces()
     #moaz: close connections
     
 

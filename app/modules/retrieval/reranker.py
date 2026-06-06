@@ -46,6 +46,7 @@ class Reranker:
             scores = await self._rerank_scores(query, results)
         except Exception as exc:
             logger.exception("Reranker failed; falling back to original order")
+            return results # Fallback to original scores if reranking fails
 
         reranked = [
             SearchResult(

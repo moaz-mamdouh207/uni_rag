@@ -21,7 +21,6 @@ from db.relational.repositories.conversation_repository import AsyncConversation
 from db.relational.repositories.message_repository import AsyncMessageRepository
 
 from modules.chat.conversation import ConversationManager
-from modules.chat.prompt_builder import PromptBuilder
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,21 +36,13 @@ def get_chat_service(
     llm_client:        LLMClient        = Depends(get_llm_client),
 ) -> ChatService:
 
-    file_processor = FileProcessor(llm_client, settings.chat)
-
     def agent_loop_factory(
         user_id:       UUID,
         course_id:     UUID,
         documents_ids: list[UUID] | None = None,
     ) -> AgentLoop:
-        """
-        Build a per-request AgentLoop scoped to the current user/course.
-        Called inside ChatService._agentic_chat() so user/course context
-        is available at request time, not at dependency-injection time.
-        """
         tools = AgentTools(
             retrieval_service=retrieval_service,
-            file_processor=file_processor,
             settings=settings.chat,
             user_id=user_id,
             course_id=course_id,
@@ -66,10 +57,8 @@ def get_chat_service(
     return ChatService(
         conversation_repo=AsyncConversationRepository(db),
         message_repo=AsyncMessageRepository(db),
-        retrieval_service=retrieval_service,
         convesation_manager=ConversationManager(settings.chat),
-        prompt_builder=PromptBuilder(),
-        llm_client=llm_client,
+        file_processor=FileProcessor(llm_client, settings.chat),
         settings=settings.chat,
         agent_loop_factory=agent_loop_factory,
     )

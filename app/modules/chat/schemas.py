@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from enum import Enum
 
+
 class ConversationMetadata(BaseModel):
     id: UUID
     name: str
@@ -11,15 +12,30 @@ class ConversationMetadata(BaseModel):
 
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1)
-    files: list[UUID] | None = Field(..., description="List of temp file IDs to include in the context")
-    stream: bool = Field(default=False, description="Whether to stream the LLM response (reserved for future use)")
+    files: list[UUID] | None = Field(
+        default=None,
+        description="List of temp file IDs to include in the context",
+    )
+    stream: bool = Field(default=False, description="Reserved for future streaming support")
 
 
 class ChatResponse(BaseModel):
-    prompt: str
     answer: str
+    sources: list[CitedSource] = Field(
+        default_factory=list,
+        description="Chunks cited by the agent, with document and page info",
+    )
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+
+
+class CitedSource(BaseModel):
+    """A single retrieval chunk surfaced to the caller for citation display."""
+    document_id: str
+    chunk_index: int
+    chunk_id: str
+    score: float
+    content_preview: str  # first 200 chars — enough for the UI to show a snippet
 
 
 class MessageResponse(BaseModel):
@@ -27,9 +43,8 @@ class MessageResponse(BaseModel):
     role: str
     content: str
 
-    model_config = {
-        "from_attributes": True
-    }
+    model_config = {"from_attributes": True}
+
 
 class ConversationHistoryResponse(BaseModel):
     conversation_id: str
@@ -39,46 +54,45 @@ class ConversationHistoryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
- 
+
 class FileType(str, Enum):
     PDF   = "pdf"
     IMAGE = "image"
- 
- 
+
+
 class PlanScope(str, Enum):
     specific  = "specific"
     all       = "all"
     ambiguous = "ambiguous"
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # FileProcessor output
 # ---------------------------------------------------------------------------
- 
+
 class FileExtractionResult(BaseModel):
     """One VLM extraction per attached file."""
     file_id:          UUID
     file_type:        FileType
     markdown_content: str  # raw structured markdown from VLM; may be NO_ITEMS_FOUND
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Planner output
 # ---------------------------------------------------------------------------
- 
+
 class ExtractedQuery(BaseModel):
     """One retrieval query derived from an extracted file item."""
-    text:           str            # verbatim question/problem text from the file
-    source_file_id: UUID | None    # None only on fallback plan
-    context_hint:   str | None     # short topic label, e.g. "calculus", "MCQ"
- 
- 
+    text:           str
+    source_file_id: UUID | None = None
+    context_hint:   str | None = None
+
+
 class Plan(BaseModel):
     """The planner's full decision for a single chat turn."""
     queries:     list[ExtractedQuery]
-    user_intent: str        # one-sentence description for PromptBuilder framing
+    user_intent: str
     scope:       PlanScope
