@@ -105,7 +105,17 @@ class LLMClient:
         )
 
         response = self._vlm.invoke([message])
-        return str(response.content)
+
+        if isinstance(response.content, list):
+            text = "".join(
+                block.get("text", "")
+                for block in response.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            text = str(response.content)
+            
+        return text
 
     # ------------------------------------------------------------------
     # New — exposes raw LangChain instance for AgentLoop.bind_tools()
