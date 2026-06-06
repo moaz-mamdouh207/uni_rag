@@ -1,13 +1,13 @@
 <div align="center">
 
-```
+<pre>
 ██╗   ██╗███╗   ██╗██╗██████╗  █████╗  ██████╗
 ██║   ██║████╗  ██║██║██╔══██╗██╔══██╗██╔════╝
 ██║   ██║██╔██╗ ██║██║██████╔╝███████║██║  ███╗
 ██║   ██║██║╚██╗██║██║██╔══██╗██╔══██║██║   ██║
 ╚██████╔╝██║ ╚████║██║██║  ██║██║  ██║╚██████╔╝
  ╚═════╝ ╚═╝  ╚═══╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝
-```
+</pre>
 
 **Your AI study buddy that actually read your lecture slides**
 
@@ -169,6 +169,7 @@ cd app && celery -A celery_app worker --loglevel=info
 cd GUI && npm run dev
 ```
 
+---
 Visit **http://localhost:3000**
 
 ---
