@@ -63,7 +63,7 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
         <span style={{ fontSize: "0.75rem", fontWeight: 600, color: isUser ? "var(--accent)" : "var(--text-3)", letterSpacing: "0.04em", textTransform: "uppercase", display: "block", marginBottom: "0.3rem" }}>
           {isUser ? "You" : "UniRAG"}
         </span>
-        <div className="message-body" style={{ fontSize: "0.9rem", color: "var(--text)", lineHeight: 1.7, wordBreak: "break-word" }}>
+        <div className="message-body" style={{ color: "var(--text)", lineHeight: 1.7, wordBreak: "break-word" }}>
           <ReactMarkdown
             remarkPlugins={[remarkMath]}
             rehypePlugins={[rehypeKatex]}

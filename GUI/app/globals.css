@@ -100,6 +100,10 @@ html, body {
   animation: shimmer 1.4s infinite;
 }
 
+.message-body {
+  font-size: 1rem; /* was 0.9rem in the inline style */
+}
+
 .message-body p { margin: 0 0 0.6em; }
 .message-body p:last-child { margin-bottom: 0; }
 .message-body ol, .message-body ul { padding-left: 1.4em; margin: 0.4em 0; }
@@ -107,4 +111,20 @@ html, body {
 .message-body code { font-family: 'JetBrains Mono', monospace; font-size: 0.82em; background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px; padding: 0.1em 0.35em; }
 .message-body pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 0.85em 1em; overflow-x: auto; margin: 0.6em 0; }
 .message-body pre code { background: none; border: none; padding: 0; font-size: 0.83em; }
-.message-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.3em 0; }
+
+/* Block equations — centered, boxed, Gemini-style */
+.message-body .katex-display {
+  display: block;
+  margin: 1em auto;
+  padding: 0.75em 1.2em;
+  background: var(--accent-glow);
+  border: 1px solid rgba(193, 127, 58, 0.3);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  overflow-x: auto;
+  text-align: center;
+}
+.message-body .katex-display > .katex {
+  display: inline-block;
+  text-align: left;
+}
