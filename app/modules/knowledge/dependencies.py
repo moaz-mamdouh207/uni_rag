@@ -12,7 +12,7 @@ from fastapi import UploadFile, HTTPException, status, Depends
 
 
 from core.config import settings
-from shared.enums import FileType, ALLOWED_KNOWLEDGE
+from shared.enums import ALLOWED_KNOWLEDGE, ALLOWED_ATTACHEMENTS
 
 from shared.constants import ErrorMessages
 from modules.knowledge.constants import UploadErrorMessages
@@ -136,7 +136,7 @@ async def validate_temp_files(files: list[UploadFile]) -> list[ValidatedFile]:
             await file.seek(0)
             type = magic.from_buffer(head, mime=True)
 
-            if type not in {item.value for item in FileType}:
+            if type not in ALLOWED_ATTACHEMENTS:
                 logger.warning("Invalid file type — %s: %s", file.filename, type)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
