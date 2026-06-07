@@ -30,7 +30,7 @@
 
 UniRAG is an AI-powered study assistant built specifically for university students. Upload your lecture slides and PDFs, then ask questions — the assistant finds the exact relevant passages from **your own documents**, shows you where it found them, solves math problems with a built-in calculator for precise answers, and explains things the way your professor does.
 
-Unlike ChatGPT, UniRAG never makes things up from thin air. Every answer comes with a citation pointing back to the exact page in your notes.
+Unlike traditional ai apps, UniRAG never makes things up from thin air. Every answer comes with a citation pointing back to the exact page in your notes.
 
 ---
 
