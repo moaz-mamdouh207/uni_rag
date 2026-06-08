@@ -10,7 +10,7 @@ from shared.enums import FileType
 
 from db.relational.schemas import  DocumentUpdate
 from db.relational.constants import DocumentStatus
-from db.vector.schemas import VectorMetadata
+from db.vector.schemas import ChunkMetaData
 import time
 
 
@@ -91,11 +91,12 @@ class IngestionService:
 
         chunks_ids: list[UUID] = [c.id for c in chunks]
         chunks_content: list[str] = [c.content for c in chunks]
-        chunks_metadatas = [ VectorMetadata(
+        chunks_metadatas = [ ChunkMetaData(
             user_id=user_id,
             course_id=course_id,
             document_id=c.document_id,
             content=c.content,
+            type=c.type,
             index=c.index,
             starting_page=c.starting_page, # type: ignore
             end_page=c.end_page, # type: ignore
@@ -110,7 +111,7 @@ class IngestionService:
             self,
             ids: list[UUID],
             contents: list[str],
-            metadatas: list[VectorMetadata],
+            metadatas: list[ChunkMetaData],
     ) -> int:
 
         if len(ids) != len(contents) or len(ids) != len(metadatas):

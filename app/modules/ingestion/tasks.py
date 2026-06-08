@@ -10,7 +10,7 @@ from modules.ingestion.dependencies import get_sync_ingestion_service
 from modules.ingestion.exceptions import IngestionError
 from db.relational.session import get_sync_db
 from modules.ingestion.schemas import TaskStatusResponse, TaskStatus
-from db.vector.schemas import VectorMetadata
+from db.vector.schemas import ChunkMetaData
 
 
 
@@ -77,7 +77,7 @@ def index_task(
             response = service.index_file(
                 ids=ids,
                 contents=contents,
-                metadatas=[VectorMetadata(**metadata) for metadata in metadatas]
+                metadatas=[ChunkMetaData(**metadata) for metadata in metadatas]
             )
 
             logger.info("ingest_task complete: chunks=%d", response)

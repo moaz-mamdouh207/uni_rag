@@ -129,7 +129,7 @@ class PdfParser:
 
             prev_chunk = chunks[-1].content if chunks else ""
 
-        return [c for c in chunks if c.type != ChunkType.UNSOLVED_QUESTION]
+        return chunks
 
 
 
