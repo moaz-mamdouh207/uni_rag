@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -20,7 +21,8 @@ from modules.chat.agent.tool_schemas import (
     RetrieveOutput,
     RetrieveResultItem,
 )
-from modules.chat.schemas import CitedSource
+from modules.chat.schemas import  CitedSource
+from db.relational.constants  import ChunkType
 from shared.tracing import observe, safe_truncate
 
 if TYPE_CHECKING:
@@ -28,6 +30,16 @@ if TYPE_CHECKING:
     from modules.retrieval.service import RetrievalService
 
 logger = logging.getLogger(__name__)
+
+# Regex that matches the citation block appended by the agent in finish()
+_CITATION_BLOCK_RE = re.compile(
+    r"%%CITATIONS%%\s*(.*?)\s*%%END_CITATIONS%%",
+    re.DOTALL,
+)
+# Matches one citation line: [N] citation_id=<id> type=<type>
+_CITATION_LINE_RE = re.compile(
+    r"\[(\d+)\]\s+citation_id=([\w\-]+)\s+type=(\w+)"
+)
 
 
 class AgentTools:
@@ -42,7 +54,7 @@ class AgentTools:
     def __init__(
         self,
         retrieval_service: RetrievalService,
-        settings:          ChatSettings,
+        settings:          "ChatSettings",
         user_id:           UUID,
         course_id:         UUID,
         documents_ids:     list[UUID] | None = None,
@@ -52,11 +64,15 @@ class AgentTools:
         self._user_id    = user_id
         self._course_id  = course_id
         self._doc_ids    = documents_ids
-        self._all_retrieved: list[RetrieveResultItem] = []
+
+        # Keyed by citation_id (chunk_id as str) -> RetrieveResultItem.
+        # Indices are globally monotonic across the whole turn so [N] in the
+        # agent's answer always maps to a unique chunk.
+        self._retrieved_by_id: dict[str, RetrieveResultItem] = {}
+        self._global_index: int = 0  # incremented for every new unique chunk
 
     # ------------------------------------------------------------------
-    # Dispatch — each tool call gets its own span, nested automatically
-    # under whatever observe() context the loop opened for this iteration
+    # Dispatch
     # ------------------------------------------------------------------
 
     async def execute(self, tool_name: str, tool_input: dict) -> str:
@@ -101,21 +117,73 @@ class AgentTools:
                 return f'{{"error": "{tool_name} failed: {str(exc)[:200]}"}}'
 
     # ------------------------------------------------------------------
-    # Citation collection
+    # Citation parsing  (called from AgentLoop after finish())
     # ------------------------------------------------------------------
 
-    def collect_cited_sources(self) -> list[CitedSource]:
-        seen: dict[str, CitedSource] = {}
-        for r in sorted(self._all_retrieved, key=lambda x: x.score, reverse=True):
-            if r.chunk_id not in seen:
-                seen[r.chunk_id] = CitedSource(
-                    document_id=r.document_id,
-                    chunk_index=r.index,
-                    chunk_id=r.chunk_id,
-                    score=r.score,
-                    content_preview=r.content[:200],
+    def parse_answer_and_citations(self, raw_answer: str) -> tuple[str, list[CitedSource]]:
+        """
+        Extract the %%CITATIONS%% block from the agent's raw finish() answer.
+
+        Returns:
+            clean_answer  — answer text with the citation block stripped out
+            cited_sources — CitedSource list built from the declared chunk IDs,
+                            ordered by inline index
+        """
+        match = _CITATION_BLOCK_RE.search(raw_answer)
+        if not match:
+            # Agent didn't append a citation block — return as-is with no sources
+            logger.warning("AgentTools: no %%CITATIONS%% block found in answer")
+            return raw_answer, []
+
+        # Strip the block (and any leading blank line before it) from the answer
+        clean_answer = _CITATION_BLOCK_RE.sub("", raw_answer).rstrip()
+
+        cited: list[CitedSource] = []
+        seen_chunk_ids: set[str] = set()
+
+        for line in match.group(1).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = _CITATION_LINE_RE.match(line)
+            if not m:
+                logger.warning("AgentTools: unrecognised citation line: %r", line)
+                continue
+
+            inline_index = int(m.group(1))
+            chunk_id     = str(m.group(2))   # always str — matches _retrieved_by_id keys
+            chunk_type   = m.group(3)
+
+            if chunk_id in seen_chunk_ids:
+                logger.warning("AgentTools: duplicate chunk_id %r in citation block, skipping", chunk_id)
+                continue
+            seen_chunk_ids.add(chunk_id)
+
+            item = self._retrieved_by_id.get(chunk_id)
+            if item is None:
+                logger.warning(
+                    "AgentTools: agent cited chunk_id=%r which was never retrieved — "
+                    "known ids: %s",
+                    chunk_id,
+                    list(self._retrieved_by_id.keys())[:10],   # log first 10 for debugging
                 )
-        return list(seen.values())
+                continue
+
+            cited.append(CitedSource(
+                inline_index=inline_index,
+                chunk_id=chunk_id,
+                document_id=item.document_id,
+                chunk_type=chunk_type,
+                score=item.score,
+                full_content=item.content,
+                content_preview=item.content[:200],
+                starting_page=item.starting_page,
+                end_page=item.end_page,
+            ))
+
+        # Sort by order of appearance in the text, not by score
+        cited.sort(key=lambda s: s.inline_index)
+        return clean_answer, cited
 
     # ------------------------------------------------------------------
     # retrieve
@@ -138,15 +206,16 @@ class AgentTools:
             user_id=self._user_id,
             course_id=self._course_id,
             documents_ids=self._doc_ids,
+            type=inp.chunk_type,
         )
 
-        items = self._format_results(response.results)
-        self._all_retrieved.extend(items)
+        items = self._register_results(response.results, inp.chunk_type)
 
         logger.debug(
-            "retrieve: query=%r hint=%r results=%d scores=%s",
+            "retrieve: query=%r hint=%r type=%r results=%d scores=%s",
             inp.query,
             inp.context_hint,
+            inp.chunk_type,
             len(items),
             [round(r.score, 3) for r in items],
         )
@@ -159,7 +228,11 @@ class AgentTools:
 
     async def _retrieve_multi(self, inp: RetrieveMultiInput) -> RetrieveMultiOutput:
         tasks = [
-            self._retrieve(RetrieveInput(query=q.query, context_hint=q.context_hint))
+            self._retrieve(RetrieveInput(
+                query=q.query,
+                chunk_type=q.chunk_type,
+                context_hint=q.context_hint,
+            ))
             for q in inp.queries
         ]
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -171,14 +244,19 @@ class AgentTools:
             if isinstance(outcome, BaseException):
                 logger.warning("retrieve_multi: query %d failed: %s", i, outcome)
                 continue
+            # Items are already registered with global indices by _retrieve;
+            # just collect them for the combined output.
             all_results.extend(outcome.results)
             queries_run += 1
 
-        deduped = self._dedup(all_results)
-        for idx, r in enumerate(deduped):
-            r.index = idx + 1
+        # Deduplicate across queries while preserving the already-assigned indices.
+        deduped = self._dedup_preserve_index(all_results)
 
-        return RetrieveMultiOutput(queries_run=queries_run, results=deduped, total=len(deduped))
+        return RetrieveMultiOutput(
+            queries_run=queries_run,
+            results=deduped,
+            total=len(deduped),
+        )
 
     # ------------------------------------------------------------------
     # calculate
@@ -199,7 +277,6 @@ class AgentTools:
                 result = self._handle_multi_statement(expression, sympy_ns)
             else:
                 from sympy import sympify
-                # Use sympy_ns only as locals (not merged into a mutable ctx)
                 parsed = sympify(expression, locals=sympy_ns)
                 try:
                     result = str(round(float(parsed.evalf()), 6))
@@ -252,11 +329,7 @@ class AgentTools:
     def _handle_multi_statement(expression: str, sympy_ns: dict) -> str:
         from sympy import sympify
 
-        # local_ctx holds ONLY user-assigned variables — never the sympy namespace.
-        # sympy_ns is passed as the exec globals so sqrt/pi/exp etc. resolve,
-        # but its contents never pollute local_ctx (fixes the '1.14.0' subs crash).
         local_ctx: dict = {}
-
         statements = [s.strip() for s in expression.split(";") if s.strip()]
 
         if not statements:
@@ -269,12 +342,10 @@ class AgentTools:
             if "=" in stmt and not stmt.startswith("["):
                 exec(stmt, sympy_ns, local_ctx)  # nosec
             elif is_last:
-                # Merge for sympify so user vars shadow sympy names if needed
                 merged = {**sympy_ns, **local_ctx}
                 parsed = sympify(stmt, locals=merged)
 
                 if isinstance(parsed, list):
-                    # Extract variable names from the list literal for clean keys
                     list_vars = [v.strip() for v in stmt.strip("[]").split(",")]
                     evaluated: dict[str, object] = {}
                     for j, sym in enumerate(parsed):
@@ -312,30 +383,59 @@ class AgentTools:
         )
 
     # ------------------------------------------------------------------
+    # Internal registration — assigns globally unique indices
+    # ------------------------------------------------------------------
+
+    def _register_results(
+        self,
+        results: list[SearchResult],
+        chunk_type: ChunkType | None,
+    ) -> list[RetrieveResultItem]:
+        """
+        Convert SearchResult objects to RetrieveResultItems.
+        citation_id is always stored as a plain str so dict lookups are reliable
+        regardless of whether the retrieval service returns str or UUID objects.
+        The `index` field is a sequential counter used only for display order in
+        the tool result -- the agent does NOT use it as [N] in citations.
+        """
+        items: list[RetrieveResultItem] = []
+        for r in results:
+            cid = str(r.chunk_id)  # normalise to str -- UUID objects won't match str keys
+            if cid in self._retrieved_by_id:
+                items.append(self._retrieved_by_id[cid])
+                continue
+
+            self._global_index += 1
+            resolved_type = chunk_type or getattr(r, "chunk_type", None)
+
+            item = RetrieveResultItem(
+                index=self._global_index,
+                content=r.content,
+                score=round(r.score, 4),
+                citation_id=cid,
+                document_id=str(r.document_id),
+                chunk_type=resolved_type,
+                starting_page=getattr(r, "starting_page", None),
+                end_page=getattr(r, "end_page", None),
+            )
+            self._retrieved_by_id[cid] = item
+            items.append(item)
+        return items
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _format_results(results: list[SearchResult]) -> list[RetrieveResultItem]:
-        items = []
-        for i, r in enumerate(results):
-            items.append(RetrieveResultItem(
-                index=i + 1,
-                content=r.content,
-                score=round(r.score, 4),
-                document_id=r.document_id,
-                chunk_id=r.chunk_id,
-                starting_page=getattr(r, "starting_page", None),
-                end_page=getattr(r, "end_page", None),
-            ))
-        return items
-
-    @staticmethod
-    def _dedup(results: list[RetrieveResultItem]) -> list[RetrieveResultItem]:
-        import hashlib
+    def _dedup_preserve_index(
+        results: list[RetrieveResultItem],
+    ) -> list[RetrieveResultItem]:
+        """
+        Deduplicate by chunk_id, keeping the item with the higher score.
+        Preserves already-assigned indices — does NOT re-index.
+        """
         seen: dict[str, RetrieveResultItem] = {}
         for r in results:
-            key = f"{r.document_id}::{hashlib.md5(r.content[:200].lower().encode(), usedforsecurity=False).hexdigest()}"
-            if key not in seen or r.score > seen[key].score:
-                seen[key] = r
+            if r.citation_id not in seen or r.score > seen[r.citation_id].score:
+                seen[r.citation_id] = r
         return sorted(seen.values(), key=lambda x: x.score, reverse=True)

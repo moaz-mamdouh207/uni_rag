@@ -20,9 +20,10 @@ from modules.chat.agent.prompts import ENGINEERING_AGENT_SYSTEM_PROMPT
 from modules.chat.agent.tools import AgentTools
 from modules.chat.schemas import CitedSource
 from shared.tracing import observe, observe_generation, set_trace_attributes
+from db.relational.constants import MessageRole
 
 if TYPE_CHECKING:
-    from modules.chat.schemas import FileExtractionResult
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,20 @@ from langchain_core.tools import tool as lc_tool
 
 
 @lc_tool
-def retrieve(query: str, context_hint: str | None = None) -> str:
+def retrieve(query: str, chunk_type: str | None = None, context_hint: str | None = None) -> str:
     """
     Search the course knowledge base for a single concept, formula, or principle.
-    Use for targeted lookup of one specific piece of engineering knowledge.
-    context_hint should be the specific engineering sub-field e.g. 'beam bending',
-    'Bernoulli equation', 'Mohr circle stress'. Always provide it when you know it.
+
+    chunk_type: REQUIRED for targeted retrieval.
+      - "theory"          → definitions, formulas, conceptual background
+      - "solved_question" → worked examples from the reference book
+
+    context_hint: the specific engineering sub-field, e.g. 'beam bending',
+    'Bernoulli equation', 'Mohr circle stress'. Always provide it.
+
+    Results include a chunk_id field — copy it exactly into your %%CITATIONS%%
+    block when you cite that chunk in your answer.
+
     # execution: AgentTools._retrieve
     """
     ...
@@ -50,9 +59,20 @@ def retrieve(query: str, context_hint: str | None = None) -> str:
 def retrieve_multi(queries: list[dict]) -> str:
     """
     Search the knowledge base for multiple independent concepts in parallel.
-    queries is a list of objects each with 'query' (required) and 'context_hint' (optional).
-    Use when you already know you need context for several different questions at once.
-    More efficient than calling retrieve() repeatedly.
+
+    Each query object accepts:
+      - "query"        (required)
+      - "chunk_type"   (required: "theory" or "solved_question")
+      - "context_hint" (recommended)
+
+    For every engineering question you should issue at least two queries:
+      1. chunk_type="theory"          — to get the relevant formulas/concepts
+      2. chunk_type="solved_question" — to get a worked example of the same type
+
+    Results include a chunk_id field — copy it exactly into your %%CITATIONS%%
+    block when you cite that chunk in your answer. Your [N] numbers are assigned
+    by you in order of first appearance in the answer, not from the result index.
+
     # execution: AgentTools._retrieve_multi
     """
     ...
@@ -95,8 +115,29 @@ def finish(answer: str) -> str:
     """
     Deliver the final answer to the user and end the loop.
     Call this only when you have retrieved all necessary context and completed
-    all calculations. This is the ONLY way to return a response to the user.
-    RESPONSE STYLE
+    all calculations.
+
+    CITATION FORMAT (mandatory):
+    1. Inline: every time you use a retrieved chunk, write [N] at the end of
+       the sentence, where N is the `index` field from that chunk's result.
+       Example: "Applying Ohm's law to the circuit gives V = IR [3]."
+
+    2. Citation block: append this block at the very end of your answer,
+       listing only the chunks you actually cited inline:
+
+       %%CITATIONS%%
+       [1] citation_id=<citation_id> type=<theory|solved_question>
+       [2] citation_id=<citation_id> type=<theory|solved_question>
+       %%END_CITATIONS%%
+
+    Rules:
+    - Only cite theory chunks you directly used for a formula or concept.
+    - Only cite solved_question chunks whose worked example is structurally
+      similar to the question being solved (same problem type, same unknowns).
+    - Never list a chunk in %%CITATIONS%% that you did not reference inline.
+    - The %%CITATIONS%% block must be the absolute last thing in the answer.
+
+    RESPONSE STYLE:
     - Each equation gets its own line with blank lines before and after.
     - Each step opens with one sentence of intent, then shows the math.
     - Numerical results are always on their own line: "Result: ζ = 0.303"
@@ -143,10 +184,12 @@ class AgentLoop:
     async def run(
         self,
         user_query:      str,
-        extracted_files: list[FileExtractionResult] | None = None,
-        history:         list[BaseMessage] | None = None,
+        attachment_contents: list[str] | None = None,
+        history:         list = [],
         trace_metadata:  dict | None = None,
     ) -> AgentLoopResult:
+        history = self._orm_history_to_lc(history)
+
         turn_start = time.perf_counter()
         tool_call_counts: dict[str, int] = {}
 
@@ -154,7 +197,7 @@ class AgentLoop:
             name="agent_turn",
             input={
                 "query":            user_query,
-                "files_count":      len(extracted_files or []),
+                "files_count":      len(attachment_contents or []),
                 "history_messages": len(history or []),
             },
             metadata={
@@ -170,20 +213,16 @@ class AgentLoop:
                     metadata=trace_metadata,
                 )
 
-            messages = self._build_initial_messages(user_query, extracted_files, history)
+            messages = self._build_initial_messages(user_query, attachment_contents, history)
             iterations = 0
 
             while iterations < self._max_iterations:
                 iterations += 1
                 logger.debug("AgentLoop: iteration %d / %d", iterations, self._max_iterations)
 
-                # ── LLM call — log the full prompt and the tool calls back ──
                 with observe_generation(
                     name=f"llm_call_iter_{iterations}",
                     input={
-                        # Full prompt sent to the model this iteration.
-                        # Each message truncated at 500 chars to keep payload readable
-                        # while still showing the actual content.
                         "messages": [
                             {
                                 "role":    _msg_role(m),
@@ -205,8 +244,6 @@ class AgentLoop:
                             "tool_calls_requested": requested_tools,
                             "tool_calls_count":     len(requested_tools),
                             "has_finish":           AgentTools.FINISH in requested_tools,
-                            # Include any direct text content (shouldn't happen
-                            # normally but useful to see when it does)
                             "text_content": (
                                 response.content[:300]
                                 if isinstance(response.content, str) and response.content.strip()
@@ -234,10 +271,13 @@ class AgentLoop:
                         "AgentLoop: LLM responded without tool calls at iteration %d", iterations
                     )
                     text = response.content if isinstance(response.content, str) else ""
+                    clean_answer, cited = self._tools.parse_answer_and_citations(
+                        text or "I was unable to produce an answer."
+                    )
                     result = AgentLoopResult(
-                        answer=text or "I was unable to produce an answer.",
+                        answer=clean_answer,
                         iterations=iterations,
-                        cited_sources=self._tools.collect_cited_sources(),
+                        cited_sources=cited,
                     )
                     turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "no_tool_calls"))
                     return result
@@ -255,12 +295,18 @@ class AgentLoop:
                             "at iteration %d — the other calls will be dropped.",
                             len(other_calls), iterations,
                         )
-                    answer = finish_call.get("args", {}).get("answer", "")
-                    logger.debug("AgentLoop: finish() called after %d iterations", iterations)
+
+                    raw_answer = finish_call.get("args", {}).get("answer", "")
+                    clean_answer, cited = self._tools.parse_answer_and_citations(raw_answer)
+
+                    logger.debug(
+                        "AgentLoop: finish() called after %d iterations, %d citations",
+                        iterations, len(cited),
+                    )
                     result = AgentLoopResult(
-                        answer=answer,
+                        answer=clean_answer,
                         iterations=iterations,
-                        cited_sources=self._tools.collect_cited_sources(),
+                        cited_sources=cited,
                     )
                     turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "finish"))
                     return result
@@ -272,11 +318,12 @@ class AgentLoop:
             # ── Hit iteration cap ─────────────────────────────────────────
             logger.warning("AgentLoop: hit max_iterations (%d) without finish()", self._max_iterations)
             partial = self._extract_partial_answer(messages)
+            clean_answer, cited = self._tools.parse_answer_and_citations(partial)
             result = AgentLoopResult(
-                answer=partial,
+                answer=clean_answer,
                 iterations=iterations,
                 hit_limit=True,
-                cited_sources=self._tools.collect_cited_sources(),
+                cited_sources=cited,
             )
             turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "hit_limit"))
             return result
@@ -293,8 +340,6 @@ class AgentLoop:
         termination_reason: str,
     ) -> dict:
         return {
-            # Full answer — not a preview — so you can read the complete
-            # response in Langfuse without going to the app
             "output": {"answer": result.answer},
             "metadata": {
                 "iterations":           result.iterations,
@@ -314,27 +359,27 @@ class AgentLoop:
     def _build_initial_messages(
         self,
         user_query:      str,
-        extracted_files: list[FileExtractionResult] | None,
+        attachment_contents: list[str] | None,
         history:         list[BaseMessage] | None,
     ) -> list[BaseMessage]:
         messages: list[BaseMessage] = [SystemMessage(content=ENGINEERING_AGENT_SYSTEM_PROMPT)]
         if history:
             messages.extend(history)
-        messages.append(HumanMessage(content=self._build_user_content(user_query, extracted_files)))
+        messages.append(HumanMessage(content=self._build_user_content(user_query, attachment_contents)))
         return messages
 
     @staticmethod
     def _build_user_content(
         user_query:      str,
-        extracted_files: list[FileExtractionResult] | None,
+        attachment_contents: list[str] | None,
     ) -> str:
-        if not extracted_files:
+        if not attachment_contents:
             return user_query
 
         files_block = "\n\n".join(
-            f"--- File {i+1} (id: {str(r.file_id)}) ---\n{r.markdown_content}"
-            for i, r in enumerate(extracted_files)
-            if r.markdown_content != "NO_ITEMS_FOUND"
+            f"--- File {i+1} ---\n{c}"
+            for i, c in enumerate(attachment_contents)
+            if c != "NO_ITEMS_FOUND"
         )
         if not files_block:
             return user_query
@@ -405,6 +450,16 @@ class AgentLoop:
             "I was unable to complete the answer within the allowed number of "
             "reasoning steps. Please try with a more specific question."
         )
+    
+    @staticmethod
+    def _orm_history_to_lc(history: list) -> list[BaseMessage]:
+        lc: list[BaseMessage] = []
+        for msg in history:
+            if msg.role == MessageRole.user:
+                lc.append(HumanMessage(content=msg.content))
+            elif msg.role == MessageRole.assistant:
+                lc.append(AIMessage(content=msg.content))
+        return lc
 
 
 # ---------------------------------------------------------------------------
@@ -422,5 +477,6 @@ def _msg_role(msg: BaseMessage) -> str:
 def _msg_content(msg: BaseMessage) -> str:
     if isinstance(msg.content, str):
         return msg.content
-    # AIMessage with tool_calls has content as a list of dicts
     return json.dumps(msg.content)
+
+

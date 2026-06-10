@@ -8,12 +8,24 @@ from __future__ import annotations
 from uuid import UUID
 from pydantic import BaseModel, Field
 
+from db.relational.constants  import ChunkType
+
 
 # ---------------------------------------------------------------------------
 # Tool inputs  (what the LLM sends)
 # ---------------------------------------------------------------------------
+
 class RetrieveInput(BaseModel):
     query: str = Field(..., min_length=1)
+    chunk_type: ChunkType | None = Field(
+        default=None,
+        description=(
+            "Filter results by chunk type. "
+            "Use 'theory' for conceptual background, definitions, and formulas. "
+            "Use 'solved_question' for worked examples from the reference book. "
+            "Omit to search across all types."
+        ),
+    )
     context_hint: str | None = Field(
         default=None,
         description=(
@@ -25,8 +37,9 @@ class RetrieveInput(BaseModel):
 
 class RetrieveQuery(BaseModel):
     """Single query inside a retrieve_multi call."""
-    query:        str      = Field(..., min_length=1)
-    context_hint: str | None = Field(default=None)
+    query:        str            = Field(..., min_length=1)
+    chunk_type:   ChunkType | None = Field(default=None)
+    context_hint: str | None    = Field(default=None)
 
 
 class RetrieveMultiInput(BaseModel):
@@ -56,9 +69,8 @@ class FinishInput(BaseModel):
         ...,
         min_length=1,
         description=(
-            "The complete final answer. Number answers to match question numbering, "
-            "show working for calculations, state units explicitly, "
-            "and include [Source: doc_id p.N] inline citations where relevant."
+            "The complete final answer with inline [N] citation markers and a "
+            "%%CITATIONS%% block at the end. See system prompt for exact format."
         ),
     )
 
@@ -68,14 +80,27 @@ class FinishInput(BaseModel):
 # ---------------------------------------------------------------------------
 
 class RetrieveResultItem(BaseModel):
-    index:       int
-    content:     str
-    score:       float
-    document_id: str
-    chunk_id:    str
-    # Page range for citation — populated from chunk metadata when available
+    """
+    What the agent sees in the tool result JSON.
+    citation_id is the value to copy verbatim into %%CITATIONS%%.
+    document_id is excluded from serialisation so the agent never sees it
+    and cannot accidentally use it instead of the chunk identifier.
+    """
+    index:         int
+    content:       str
+    score:         float
+    citation_id:   str             # copy this value into %%CITATIONS%%
+    chunk_type:    ChunkType | None = None
     starting_page: int | None = None
     end_page:      int | None = None
+
+    # Internal only - never sent to the agent
+    document_id:   str = Field(default="", exclude=True)
+
+    @property
+    def chunk_id(self) -> str:
+        """Alias so tools.py can still use .chunk_id internally."""
+        return self.citation_id
 
 
 class RetrieveOutput(BaseModel):
