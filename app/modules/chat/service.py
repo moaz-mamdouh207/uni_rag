@@ -3,9 +3,7 @@ import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from modules.chat.file_processor import FileProcessor
 from db.relational.schemas import ConversationCreate, MessageCreate
 from db.relational.models.conversation import Conversation
 from db.relational.constants import MessageRole
@@ -14,18 +12,25 @@ from modules.chat.schemas import (
     ChatRequest,
     ChatResponse,
     CitedSource,
-    ConversationHistoryResponse,
+    ConversationHistory,
     ConversationMetadata,
-    FileExtractionResult,
+    MessageMetadata,
 )
+
 from shared.tracing import observe
+
+from modules.chat.utils.asset import save_attachment
+
+from modules.chat.schemas import Attachment
 
 if TYPE_CHECKING:
     from modules.chat.config import ChatSettings
     from db.relational.repositories.conversation_repository import AsyncConversationRepository
     from db.relational.repositories.message_repository import AsyncMessageRepository
-    from modules.chat.conversation import ConversationManager
+    from modules.chat.conversation_manager import ConversationManager
     from db.relational.schemas import ConversationUpdate
+    from modules.chat.dependencies import ValidatedAttachment
+    from modules.chat.attachment_processor import AttachmentProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ class ChatService:
         conversation_repo:   AsyncConversationRepository,
         message_repo:        AsyncMessageRepository,
         convesation_manager: ConversationManager,
-        file_processor:      FileProcessor,
+        file_processor:      AttachmentProcessor,
         settings:            ChatSettings,
         agent_loop_factory,
     ):
@@ -48,7 +53,7 @@ class ChatService:
         self._agent_loop_factory = agent_loop_factory
 
     # ------------------------------------------------------------------
-    # Conversation CRUD
+    # Conversation
     # ------------------------------------------------------------------
 
     async def add_conversation(self, data: ConversationCreate, user_id: UUID) -> ConversationMetadata:
@@ -66,33 +71,55 @@ class ChatService:
     async def delete_conversation(self, conv: Conversation) -> None:
         await self._conv_repo.delete(conv)
 
+    async def list_messages(self, id: UUID) -> list[MessageMetadata]:
+        messages = await self._message_repo.get_all_by_conversation(id)
+        return [MessageMetadata(role=m.role, content=m.content) for m in messages]
+
+
+
     # ------------------------------------------------------------------
-    # Core chat turn
+    # chat
     # ------------------------------------------------------------------
+    async def attach_documents(
+        self,
+        attachments: list[ValidatedAttachment]
+    ) -> list[Attachment]:
+        
+        saved_attachments = []
+
+        for attachment in attachments:
+            attachment_id = await save_attachment(
+                name=attachment.name, 
+                file=attachment.file,
+            )
+            saved_attachments.append(Attachment(
+                id=attachment_id,
+                type=attachment.type,
+            ))
+
+        return saved_attachments
+
 
     async def chat(self, conv: Conversation, request: ChatRequest) -> ChatResponse:
         raw_history     = await self._message_repo.get_all_by_conversation(conv.id)
         trimmed_history = self._conv_manager.trim_history(raw_history)
 
-        # ── File extraction — traced with full content preview ────────────
-        extracted_files: list[FileExtractionResult] = []
-        if request.files:
+        attachment_contents: list[str] = []
+        if request.attachments:
             with observe(
-                name="file_extraction",
-                input={"file_ids": [str(f) for f in request.files]},
+                name="attachments_extraction",
+                input={"attachments_ids": [str(a.id) for a in request.attachments]},
             ) as span:
-                extracted_files = await self._file_processor.process(request.files, request.query)
-                await self._file_processor.cleanup(request.files)
+                attachment_contents = await self._file_processor.process(request.attachments, request.query)
+                await self._file_processor.cleanup(request.attachments)
                 span.update(output={
-                    "files": [
+                    "attachments": [
                         {
-                            "id":              str(f.file_id),
-                            "type":            str(f.file_type),
-                            "chars":           len(f.markdown_content),
-                            "has_content":     f.markdown_content != "NO_ITEMS_FOUND",
-                            "content_preview": f.markdown_content[:5000],
+                            "chars":           len(a),
+                            "has_content":     a != "NO_ITEMS_FOUND",
+                            "content_preview": a[:500],
                         }
-                        for f in extracted_files
+                        for a in attachment_contents
                     ]
                 })
 
@@ -100,7 +127,7 @@ class ChatService:
             request=request,
             conv=conv,
             history=trimmed_history,
-            extracted_files=extracted_files,
+            attachment_contents=attachment_contents,
         )
 
         await self._message_repo.add(
@@ -127,13 +154,10 @@ class ChatService:
             completion_tokens=completion_tokens,
         )
 
-    async def get_history(self, id: UUID) -> ConversationHistoryResponse:
-        messages = await self._message_repo.get_all_by_conversation(id)
-        return ConversationHistoryResponse(
-            conversation_id=str(id),
-            messages=messages,  # type: ignore[arg-type]
-            total=len(messages),
-        )
+
+    
+
+
 
     # ------------------------------------------------------------------
     # Private
@@ -144,7 +168,7 @@ class ChatService:
         request:         ChatRequest,
         conv:            Conversation,
         history:         list,
-        extracted_files: list[FileExtractionResult] | None = None,
+        attachment_contents: list[str] | None = None,
     ) -> tuple[str, list[CitedSource], int | None, int | None]:
         agent_loop = self._agent_loop_factory(
             user_id=conv.user_id,
@@ -154,8 +178,8 @@ class ChatService:
 
         result = await agent_loop.run(
             user_query=request.query,
-            extracted_files=extracted_files,
-            history=self._orm_history_to_lc(history),
+            attachment_contents=attachment_contents,
+            history=history,
             trace_metadata={
                 "conversation_id": str(conv.id),
                 "user_id":         str(conv.user_id),
@@ -167,13 +191,3 @@ class ChatService:
             logger.warning("ChatService: agent hit iteration limit for conv %s", conv.id)
 
         return result.answer, result.cited_sources, None, None
-
-    @staticmethod
-    def _orm_history_to_lc(history: list) -> list[BaseMessage]:
-        lc: list[BaseMessage] = []
-        for msg in history:
-            if msg.role == MessageRole.user:
-                lc.append(HumanMessage(content=msg.content))
-            elif msg.role == MessageRole.assistant:
-                lc.append(AIMessage(content=msg.content))
-        return lc

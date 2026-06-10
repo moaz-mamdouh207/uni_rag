@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
+
 from db.vector.schemas import SearchQuery, SearchResult, SearchFilter
 
 from shared.embedder import Embedder
@@ -13,6 +14,7 @@ from modules.retrieval.reranker import Reranker
 
 if TYPE_CHECKING:
     from db.vector.base import AsyncVectorDBRepository
+    from db.relational.constants import ChunkType
 
 
 class RetrievalService:
@@ -32,6 +34,7 @@ class RetrievalService:
         user_id: UUID,
         course_id: UUID,
         documents_ids: list[UUID] | None = None,
+        type: ChunkType | None = None
     ) -> RetrievalResponse:
         """
         Full retrieval pipeline for a single query.
@@ -49,7 +52,8 @@ class RetrievalService:
         filters = SearchFilter(
             user_id=user_id,
             course_id=course_id,
-            documents_ids=documents_ids
+            documents_ids=documents_ids,
+            type=type
         )
 
         results: list[SearchResult] = await self._vector_repo.search(

@@ -12,10 +12,9 @@ from fastapi import UploadFile, HTTPException, status, Depends
 
 
 from core.config import settings
-from shared.enums import ALLOWED_KNOWLEDGE, ALLOWED_ATTACHEMENTS
+from shared.enums import ALLOWED_KNOWLEDGE
 
 from shared.constants import ErrorMessages
-from modules.knowledge.constants import UploadErrorMessages
 
 from modules.knowledge.course_service import CourseService
 from modules.knowledge.document_service import DocumentService
@@ -55,7 +54,7 @@ async def validate_knowledge_files(files: list[UploadFile]) -> list[ValidatedFil
         if not file.filename:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=UploadErrorMessages.MISSING_FILENAME
+                detail=ErrorMessages.MISSING_FILENAME
             )
 
         try:
@@ -70,7 +69,7 @@ async def validate_knowledge_files(files: list[UploadFile]) -> list[ValidatedFil
                 logger.error("File too large — %s: %d bytes", file.filename, size)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=UploadErrorMessages.FILE_TOO_LARGE
+                    detail=ErrorMessages.FILE_TOO_LARGE
                 )
 
             head = await file.read(2048)
@@ -81,7 +80,7 @@ async def validate_knowledge_files(files: list[UploadFile]) -> list[ValidatedFil
                 logger.warning("Invalid file type — %s: %s", file.filename, type)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=UploadErrorMessages.INVALID_TYPE
+                    detail=ErrorMessages.INVALID_TYPE
                 )
 
         except HTTPException:
@@ -91,7 +90,7 @@ async def validate_knowledge_files(files: list[UploadFile]) -> list[ValidatedFil
             logger.error("File validation failed — %s: %s", file.filename, e, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=UploadErrorMessages.CORRUPTED_FILE
+                detail=ErrorMessages.CORRUPTED_FILE
             )
         
         validated_files.append(ValidatedFile(
@@ -103,64 +102,6 @@ async def validate_knowledge_files(files: list[UploadFile]) -> list[ValidatedFil
 
     return validated_files
 
-
-async def validate_temp_files(files: list[UploadFile]) -> list[ValidatedFile]:
-    document_settings = settings.document
-    max_bytes = document_settings.max_document_size_in_mbs * 1024 * 1024
-    validated_files = []
-
-    for file in files:
-
-        if not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=UploadErrorMessages.MISSING_FILENAME
-            )
-
-        try:
-            if not file.size:
-                await asyncio.to_thread(file.file.seek, 0, os.SEEK_END)
-                size = await asyncio.to_thread(file.file.tell)
-                await asyncio.to_thread(file.file.seek, 0)
-            else:
-                size = file.size
-
-            if size > max_bytes:
-                logger.error("File too large — %s: %d bytes", file.filename, size)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=UploadErrorMessages.FILE_TOO_LARGE
-                )
-
-            head = await file.read(2048)
-            await file.seek(0)
-            type = magic.from_buffer(head, mime=True)
-
-            if type not in ALLOWED_ATTACHEMENTS:
-                logger.warning("Invalid file type — %s: %s", file.filename, type)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=UploadErrorMessages.INVALID_TYPE
-                )
-
-        except HTTPException:
-            raise  # let validation errors propagate as-is
-
-        except Exception as e:
-            logger.error("File validation failed — %s: %s", file.filename, e, exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=UploadErrorMessages.CORRUPTED_FILE
-            )
-        
-        validated_files.append(ValidatedFile(
-            file=file.file,
-            original_name=file.filename,
-            type=type,
-            size=size,
-        ))
-
-    return validated_files
 
 
 

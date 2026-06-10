@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from uuid import UUID
 
-
+# ── Responses ─────────────────────────────────────────────────────────────────
 class CourseMetadata(BaseModel):
     "The metadata exposed to the front end"
     id: UUID

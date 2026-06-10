@@ -1,6 +1,7 @@
 from enum import StrEnum
 from pydantic import BaseModel, Field, model_validator
 
+
 class TaskStatus(StrEnum):
     PENDING  = "PENDING"
     STARTED  = "STARTED"
@@ -51,12 +52,13 @@ class BatchIndexResponse(BaseModel):
         return self
     
 
-
-
-
-
+# ── Responses ──────────────────────────────────────────────────────────────────
 class TaskStatusResponse(BaseModel):
     task_id: str
     status: TaskStatus
     result: dict | None = None
     error: str | None = None
+
+
+
+

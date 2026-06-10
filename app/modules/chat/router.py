@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, status, UploadFile
  
@@ -10,25 +9,25 @@ from db.relational.models.conversation import Conversation
 
 from modules.auth.dependencies import get_current_user
 
-from modules.chat.agent.dependencies import (
+from modules.chat.dependencies import (
     get_chat_service, 
     get_current_conv
 )
 
 from modules.chat.schemas import (
+    Attachment,
     ConversationMetadata,
     ChatRequest, 
     ChatResponse, 
-    ConversationHistoryResponse
+    MessageMetadata
 )
 
 from db.relational.schemas import ConversationCreate, ConversationUpdate
 
-from modules.knowledge.dependencies import get_document_service, validate_temp_files
+from modules.chat.dependencies import validate_attachments
 
 if TYPE_CHECKING:
     from modules.chat.service import ChatService
-    from modules.knowledge.document_service import DocumentService
 
 
 chat_router = APIRouter(prefix="/chat", tags=["chat"])
@@ -62,10 +61,9 @@ async def list_conversations(
     user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service),
 ) -> list[ConversationMetadata]:
-    response = await chat_service.list_conversations(
+    return await chat_service.list_conversations(
         user_id=user.id
     )
-    return response
 
 
 @chat_router.patch(
@@ -79,11 +77,10 @@ async def update_conversation(
     conv: Conversation = Depends(get_current_conv),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> ConversationMetadata:
-    response = await chat_service.update_conversation(
+    return await chat_service.update_conversation(
         conv=conv,
         data=data
     )
-    return response
     
 
 @chat_router.delete(
@@ -96,10 +93,10 @@ async def delete_conversation(
     conv: Conversation = Depends(get_current_conv),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> None:
-    response = await chat_service.delete_conversation(
+    return await chat_service.delete_conversation(
         conv=conv
     )
-    return response
+
 
 
 @chat_router.post(
@@ -113,39 +110,37 @@ async def send_message(
     conv: Conversation = Depends(get_current_conv),
     service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
-    response = await service.chat(
+    return await service.chat(
         conv=conv, 
         request=request
     )
-    return response
 
 
 @chat_router.post(
     "/conversations/{conversation_id}/messages/attachments",
     summary="upload temporary documents to be used in chat",
-    response_model=list[UUID],
+    response_model=list[Attachment],
     status_code=status.HTTP_201_CREATED
 )
-async def upload_temp_documents(
+async def attach_documents(
     files: list[UploadFile],
-    user: User = Depends(get_current_user),
-    document_service: DocumentService = Depends(get_document_service)
-) -> list[UUID]:
-    validated_files = await validate_temp_files(files)
-    response = await document_service.upload_temp_documents(
-        files=validated_files
+    conv: Conversation = Depends(get_current_conv),
+    service: ChatService = Depends(get_chat_service),
+) -> list[Attachment]:
+    validated_attachments = await validate_attachments(files)
+    return await service.attach_documents(
+        attachments=validated_attachments
     )
-    return response
 
-
+ 
 @chat_router.get(
-    "/conversations/{conversation_id}/history",
+    "/conversations/{conversation_id}/messages",
     summary="Fetch the full message history for a conversation",
-    response_model=ConversationHistoryResponse,
+    response_model=list[MessageMetadata],
     status_code=status.HTTP_200_OK,
 )
 async def get_history(
     conv: Conversation = Depends(get_current_conv),
     service: ChatService = Depends(get_chat_service),
-) -> ConversationHistoryResponse:
-    return await service.get_history(conv.id)
+) -> list[MessageMetadata]:
+    return await service.list_messages(conv.id)

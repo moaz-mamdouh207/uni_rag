@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 
 from modules.knowledge.schemas import  DocumentMetadata, UploadTaskInfo
-from modules.knowledge.utils.asset import save_file_to_disk, save_temp_file_to_disk
+from modules.knowledge.utils.asset import save_file_to_disk
 from modules.knowledge.utils.manifest import register_manifest
 from shared.enums import FileType
 from db.relational.constants import DocumentStatus
@@ -74,20 +74,6 @@ class DocumentService:
             tasks.append(task)
 
         return tasks
-    
-
-    async def upload_temp_documents(
-        self,
-        files: list[ValidatedFile]
-    ) -> list[UUID]:
-        
-        ids = []
-
-        for file in files:
-            file_id = await save_temp_file_to_disk(name=file.original_name, file=file.file)
-            ids.append(file_id)
-
-        return ids
     
 
     async def add_document(self, data: DocumentCreate, course_id: UUID) -> DocumentMetadata:

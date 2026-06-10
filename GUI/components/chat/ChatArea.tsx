@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Send, Bot, User, Sparkles, BookOpen, Paperclip, X, FileText, Image as ImageIcon, File } from "lucide-react";
 import { chat, conversations, documents } from "@/lib/api";
-import type { Message, Conversation } from "@/lib/api";
+import type { Message, Conversation, Attachment } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -14,7 +14,7 @@ interface Props {
 
 interface AttachedFile {
   file: File;
-  id?: string;
+  attachment?: Attachment;   // id + type returned by the server
   uploading: boolean;
   error?: string;
 }
@@ -145,7 +145,7 @@ export default function ChatArea({ conversationId }: Props) {
     setLoadingHistory(true);
     try {
       const res = await chat.history(id);
-      setMessages(res.messages.filter((m: Message) => m.role !== "system"));
+      setMessages(res.filter((m: Message) => m.role !== "system"));
     } catch {
       setMessages([]);
     } finally {
@@ -178,6 +178,7 @@ export default function ChatArea({ conversationId }: Props) {
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!conversationId) return;
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -186,19 +187,21 @@ export default function ChatArea({ conversationId }: Props) {
     setAttachedFiles(prev => [...prev, ...placeholders]);
 
     try {
-      const ids = await documents.uploadTemp(files);
+      // Upload against the current conversation; returns Attachment[] with id + type
+      const attachments = await documents.uploadTemp(conversationId, files);
       setAttachedFiles(prev => {
         const updated = [...prev];
-        let idIdx = 0;
-        for (let i = updated.length - placeholders.length; i < updated.length; i++) {
-          updated[i] = { ...updated[i], uploading: false, id: ids[idIdx++] };
-        }
+        const startIdx = updated.length - placeholders.length;
+        attachments.forEach((attachment, i) => {
+          updated[startIdx + i] = { ...updated[startIdx + i], uploading: false, attachment };
+        });
         return updated;
       });
     } catch (err) {
       setAttachedFiles(prev => {
         const updated = [...prev];
-        for (let i = updated.length - placeholders.length; i < updated.length; i++) {
+        const startIdx = updated.length - placeholders.length;
+        for (let i = startIdx; i < updated.length; i++) {
           updated[i] = { ...updated[i], uploading: false, error: err instanceof Error ? err.message : "Upload failed" };
         }
         return updated;
@@ -211,7 +214,11 @@ export default function ChatArea({ conversationId }: Props) {
   };
 
   const anyUploading = attachedFiles.some(f => f.uploading);
-  const readyFileIds = attachedFiles.filter(f => f.id && !f.error).map(f => f.id as string);
+
+  // Collect successfully uploaded Attachment objects to send with the message
+  const readyAttachments: Attachment[] = attachedFiles
+    .filter(f => f.attachment && !f.error)
+    .map(f => f.attachment as Attachment);
 
   const send = async () => {
     const query = input.trim();
@@ -225,7 +232,11 @@ export default function ChatArea({ conversationId }: Props) {
     setMessages(prev => [...prev, { role: "user", content: query }]);
 
     try {
-      const res = await chat.send(conversationId, query, readyFileIds.length ? readyFileIds : undefined);
+      const res = await chat.send(
+        conversationId,
+        query,
+        readyAttachments.length ? readyAttachments : undefined,
+      );
       setMessages(prev => [...prev, { role: "assistant", content: res.answer }]);
     } catch (err) {
       setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err instanceof Error ? err.message : "Something went wrong"}` }]);
@@ -242,12 +253,6 @@ export default function ChatArea({ conversationId }: Props) {
   };
 
   const canSend = !!input.trim() && !sending && !anyUploading;
-
-  // ── render ──────────────────────────────────────────────────────────────────
-  // The messages scroll area must never be a flex centering container when there
-  // ARE messages — that's what caused the first message to render centered.
-  // We always render a normal block flow; empty/no-conv states are just regular
-  // block children (not flex-centered wrappers that stretch to fill).
 
   const renderContent = () => {
     if (!conversationId) return <NoConvSelected />;
@@ -274,7 +279,7 @@ export default function ChatArea({ conversationId }: Props) {
         </div>
       )}
 
-      {/* Messages — plain block scroll, no flex centering */}
+      {/* Messages */}
       <div style={{ flex: 1, overflowY: "auto", padding: "0 1.5rem" }}>
         {renderContent()}
       </div>

@@ -53,35 +53,30 @@ export interface Course { id: string; name: string }
 
 export const courses = {
   list: () =>
-    request<Course[]>(
-      "/knowledge/courses"
-    ),
+    request<Course[]>("/knowledge/courses"),
 
   create: (name: string) =>
-    request<Course>(
-      "/knowledge/courses",
-      { method: "POST", body: JSON.stringify({ name }) }
-    ),
+    request<Course>("/knowledge/courses", { method: "POST", body: JSON.stringify({ name }) }),
 
   delete: (id: string) =>
-    request(
-      `/knowledge/courses/${id}`,
-      { method: "DELETE" }
-    ),
+    request(`/knowledge/courses/${id}`, { method: "DELETE" }),
 };
 
 // ── Documents ─────────────────────────────────────────────────────────────────
-export interface Document {
-  id: string;
-  name: string;
-}
+export interface Document { id: string; name: string }
 export interface UploadTaskInfo { id: string; name: string; task_id: string }
+
+// Matches the server's AttachmentType enum values
+export type AttachmentType = "pdf" | "image/png" | "image/jpeg" | "image/webp";
+
+export interface Attachment {
+  id: string;       // UUID
+  type: AttachmentType;
+}
 
 export const documents = {
   list: (courseId: string) =>
-    request<Document[]>(
-      `/knowledge/courses/${courseId}/documents`
-    ),
+    request<Document[]>(`/knowledge/courses/${courseId}/documents`),
 
   upload: async (courseId: string, files: File[]): Promise<UploadTaskInfo[]> => {
     const token = getToken();
@@ -99,21 +94,28 @@ export const documents = {
     return res.json();
   },
 
-  /** Upload temporary files for use in a single chat message. Returns list of UUIDs. */
-  uploadTemp: async (files: File[]): Promise<string[]> => {
+  /**
+   * Upload temporary attachments scoped to a conversation.
+   * POST /chat/conversations/{conversationId}/messages/attachments
+   * Returns Attachment[] — each with `id` (UUID) and `type` (AttachmentType).
+   */
+  uploadTemp: async (conversationId: string, files: File[]): Promise<Attachment[]> => {
     const token = getToken();
     const form = new FormData();
     files.forEach((f) => form.append("files", f));
-    const res = await fetch(`${BASE_URL}/knowledge/courses/temp_documents`, {
-      method: "POST",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: form,
-    });
+    const res = await fetch(
+      `${BASE_URL}/chat/conversations/${conversationId}/messages/attachments`,
+      {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+      }
+    );
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || "Temp upload failed");
     }
-    return res.json(); // list[UUID] as strings
+    return res.json(); // Attachment[]
   },
 
   delete: (courseId: string, documentId: string) =>
@@ -127,6 +129,7 @@ export interface TaskStatus {
   result?: Record<string, unknown>;
   error?: string;
 }
+
 export const tasks = {
   status: (taskId: string) => request<TaskStatus>(`/tasks/${taskId}`),
 };
@@ -136,12 +139,16 @@ export interface Conversation { id: string; name: string }
 
 export const conversations = {
   list: () => request<Conversation[]>("/chat/conversations"),
+
   create: (name: string, course_id: string, documents_ids?: string[]) =>
     request<Conversation>("/chat/conversations", {
       method: "POST",
       body: JSON.stringify({ name, meta: { course_id, documents_ids: documents_ids ?? null } }),
     }),
-  delete: (id: string) => request(`/chat/conversations/${id}`, { method: "DELETE" }),
+
+  delete: (id: string) =>
+    request(`/chat/conversations/${id}`, { method: "DELETE" }),
+
   update: (id: string, name: string) =>
     request<Conversation>(`/chat/conversations/${id}`, {
       method: "PATCH",
@@ -160,21 +167,23 @@ export interface ChatResponse {
 
 export const chat = {
   /**
-   * Send a message. Optionally attach temp-uploaded file UUIDs.
-   * files should be UUIDs returned by documents.uploadTemp().
+   * GET /chat/conversations/{conversationId}/messages
+   * Returns Message[] directly.
    */
-  send: (conversationId: string, query: string, files?: string[]) =>
+  history: (conversationId: string) =>
+    request<Message[]>(`/chat/conversations/${conversationId}/messages`),
+
+  /**
+   * POST /chat/conversations/{conversationId}/messages
+   * Body: { query, attachments, stream }
+   */
+  send: (conversationId: string, query: string, attachments?: Attachment[]) =>
     request<ChatResponse>(`/chat/conversations/${conversationId}/messages`, {
       method: "POST",
       body: JSON.stringify({
         query,
-        files: files && files.length > 0 ? files : null,
+        attachments: attachments && attachments.length > 0 ? attachments : null,
         stream: false,
       }),
     }),
-
-  history: (conversationId: string) =>
-    request<{ conversation_id: string; messages: Message[]; total: number }>(
-      `/chat/conversations/${conversationId}/history`
-    ),
 };

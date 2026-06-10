@@ -10,11 +10,3 @@ class FileType(str, Enum):
     PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 ALLOWED_KNOWLEDGE = {item.value for item in FileType}
-
-class TempFileType(str, Enum):
-    PDF = "pdf"
-    PNG = "image/png"
-    JPEG = "image/jpeg"
-    WEBP = "image/webp"
-
-ALLOWED_ATTACHEMENTS = {item.value for item in TempFileType}
