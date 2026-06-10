@@ -13,7 +13,7 @@ from db.vector.config import QdrantSettings
 from db.vector.schemas import SearchResult
 
 if TYPE_CHECKING:
-    from db.vector.schemas import VectorMetadata, SearchFilter
+    from db.vector.schemas import ChunkMetaData, SearchFilter
     from qdrant_client.models import Condition
 
 # ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ class QdrantSyncProvider(SyncVectorDBRepository):
         self,
         ids: list[UUID],
         vectors: list[list[float]],
-        metadatas: list[VectorMetadata],
+        metadatas: list[ChunkMetaData],
     ) -> None:
         if not (len(ids) == len(vectors) == len(metadatas)):
             raise ValueError(
@@ -157,6 +157,15 @@ class QdrantAsyncProvider(AsyncVectorDBRepository):
                     match=MatchAny(any=[str(doc_id) for doc_id in filters.documents_ids]),
                 )
             )
+            
+        if filters.type is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="type",
+                    match=MatchValue(value=filters.type.value),
+                )
+            )
+        
 
         results = await self._client.query_points(
             collection_name=self._collection,

@@ -1,12 +1,15 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
 
-class VectorMetadata(BaseModel):
+from db.relational.constants import ChunkType
+
+class ChunkMetaData(BaseModel):
     user_id: UUID
     course_id: UUID
     document_id: UUID
     content: str
     index: int
+    type: ChunkType
     starting_page: int
     end_page: int
 
@@ -15,6 +18,7 @@ class SearchFilter(BaseModel):
     user_id: UUID
     course_id: UUID
     documents_ids: list[UUID] | None
+    type: ChunkType | None
 
 
 class SearchQuery(BaseModel):

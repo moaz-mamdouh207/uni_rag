@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from db.vector.schemas import VectorMetadata, SearchFilter, SearchResult
+    from db.vector.schemas import ChunkMetaData, SearchFilter, SearchResult
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ class SyncVectorDBRepository(ABC):
         self,
         ids: list[UUID],
         vectors: list[list[float]],
-        metadatas: list[VectorMetadata],
+        metadatas: list[ChunkMetaData],
     ) -> None:
         """Insert or update a batch of vectors. Idempotent."""
 

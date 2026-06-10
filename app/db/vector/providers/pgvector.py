@@ -9,16 +9,17 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Enum
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase,  mapped_column, sessionmaker
 
 from db.vector.base import AsyncVectorDBRepository, SyncVectorDBRepository
 from db.vector.config import PgVectorSettings
 from db.vector.schemas import SearchResult
+from db.relational.constants import ChunkType
 
 if TYPE_CHECKING:
-    from db.vector.schemas import VectorMetadata, SearchFilter
+    from db.vector.schemas import ChunkMetaData, SearchFilter
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,11 @@ def _build_model(table_name: str, dims: int) -> type:
         course_id = mapped_column(Text, nullable=False)
         document_id = mapped_column(Text, nullable=False)
         content = mapped_column(Text, nullable=False)
+        type = mapped_column(
+            Enum(ChunkType, native_enum=False),
+            nullable=False,
+            default=ChunkType.THEORY,
+        )
         index = mapped_column(Integer, nullable=False)
         starting_page = mapped_column(Integer, nullable=True)
         end_page = mapped_column(Integer, nullable=True)
@@ -64,6 +70,8 @@ def _build_where_clauses(model: type, filters: SearchFilter) -> list:
         conditions.append(
             model.document_id.in_([str(d) for d in filters.documents_ids])
         )
+    if filters.type is not None:
+        conditions.append(model.type == filters.type)
     return conditions
 
 
@@ -105,7 +113,7 @@ class PgVectorSyncProvider(SyncVectorDBRepository):
         self,
         ids: list[UUID],
         vectors: list[list[float]],
-        metadatas: list[VectorMetadata],
+        metadatas: list[ChunkMetaData],
     ) -> None:
         if not (len(ids) == len(vectors) == len(metadatas)):
             raise ValueError(
@@ -121,6 +129,7 @@ class PgVectorSyncProvider(SyncVectorDBRepository):
                 "document_id": str(meta.document_id),
                 "content": meta.content,
                 "index": meta.index,
+                "tpe": meta.type,
                 "starting_page": meta.starting_page,
                 "end_page": meta.end_page,
                 "embedding": vec,
