@@ -1,8 +1,8 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { Send, Bot, User, Sparkles, BookOpen, Paperclip, X, FileText, Image as ImageIcon, File } from "lucide-react";
 import { chat, conversations, documents } from "@/lib/api";
-import type { Message, Conversation, Attachment } from "@/lib/api";
+import type { Message, Conversation, Attachment, CitedSource } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -17,6 +17,12 @@ interface AttachedFile {
   attachment?: Attachment;   // id + type returned by the server
   uploading: boolean;
   error?: string;
+}
+
+// Local message shape — augments the API Message with optional citation sources
+// returned alongside an assistant answer.
+interface DisplayMessage extends Message {
+  sources?: CitedSource[];
 }
 
 function fileIcon(file: File) {
@@ -49,7 +55,145 @@ function AttachmentPill({ af, onRemove }: { af: AttachedFile; onRemove: () => vo
   );
 }
 
-function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
+// Renders a single [n] citation marker with a hover tooltip showing the
+// agent's reason for the citation plus the source document and page range.
+function CitationMarker({ source, label }: { source?: CitedSource; label: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  if (!source) {
+    // No matching source for this index — render as plain text.
+    return <sup>[{label}]</sup>;
+  }
+
+  const pageRange = source.starting_page === source.end_page
+    ? `Page ${source.starting_page}`
+    : `Pages ${source.starting_page}–${source.end_page}`;
+
+  return (
+    <span
+      style={{ position: "relative", display: "inline-block" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <sup
+        style={{
+          display: "inline-block",
+          fontSize: "0.7em",
+          fontWeight: 600,
+          color: "var(--accent)",
+          background: "var(--accent-glow)",
+          border: "1px solid rgba(193, 127, 58, 0.3)",
+          borderRadius: 4,
+          padding: "0 0.3em",
+          margin: "0 0.1em",
+          cursor: "default",
+          lineHeight: 1.4,
+          verticalAlign: "super",
+        }}
+      >
+        [{source.index.replace(/[[\]]/g, "")}]
+      </sup>
+      {hovered && (
+        <span
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 6px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: 240,
+            maxWidth: "80vw",
+            background: "var(--surface)",
+            border: "1px solid var(--border-2)",
+            borderRadius: 9,
+            boxShadow: "0 6px 20px rgba(0, 0, 0, 0.18)",
+            padding: "0.6rem 0.7rem",
+            zIndex: 50,
+            fontSize: "0.78rem",
+            lineHeight: 1.5,
+            whiteSpace: "normal",
+            textAlign: "left",
+          }}
+        >
+          <span style={{ display: "block", color: "var(--text)", marginBottom: "0.4rem" }}>
+            {source.reason}
+          </span>
+          <span
+            style={{
+              display: "block",
+              color: "var(--text-3)",
+              fontSize: "0.7rem",
+              fontWeight: 600,
+              letterSpacing: "0.03em",
+              borderTop: "1px solid var(--border)",
+              paddingTop: "0.35rem",
+            }}
+          >
+            Document {source.document_id.slice(0, 8)}… · {pageRange}
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+// Splits message content on [n] markers and interleaves rendered markdown
+// segments with CitationMarker components.
+function renderMessageContent(content: string, sources?: CitedSource[]) {
+  const sourceMap = new Map<string, CitedSource>();
+  (sources || []).forEach(s => sourceMap.set(s.index.replace(/[[\]]/g, ""), s));
+
+  const citationRegex = /\[(\d+)\]/g;
+  const parts: { text: string; citation?: string }[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = citationRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ text: content.slice(lastIndex, match.index) });
+    }
+    parts.push({ text: "", citation: match[1] });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < content.length) {
+    parts.push({ text: content.slice(lastIndex) });
+  }
+
+  // If there are no citations at all, render the whole thing as one markdown block.
+  if (!parts.some(p => p.citation)) {
+    return (
+      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+        {content}
+      </ReactMarkdown>
+    );
+  }
+
+  return (
+    <span>
+      {parts.map((p, i) => {
+        if (p.citation) {
+          const src = sourceMap.get(p.citation);
+          return <CitationMarker key={i} source={src} label={p.citation} />;
+        }
+        if (!p.text) return null;
+        return (
+          <ReactMarkdown
+            key={i}
+            remarkPlugins={[remarkMath]}
+            rehypePlugins={[rehypeKatex]}
+            // Render inline-ish: paragraphs become spans via component override
+            components={{
+              p: ({ children }) => <Fragment>{children}</Fragment>,
+            }}
+          >
+            {p.text}
+          </ReactMarkdown>
+        );
+      })}
+    </span>
+  );
+}
+
+function MessageBubble({ msg, isLast }: { msg: DisplayMessage; isLast: boolean }) {
   const isUser = msg.role === "user";
   return (
     <div
@@ -64,12 +208,9 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
           {isUser ? "You" : "UniRAG"}
         </span>
         <div className="message-body" style={{ color: "var(--text)", lineHeight: 1.7, wordBreak: "break-word" }}>
-          <ReactMarkdown
-            remarkPlugins={[remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-          >
-            {msg.content}
-          </ReactMarkdown>
+          {isUser
+            ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown>
+            : renderMessageContent(msg.content, msg.sources)}
         </div>
       </div>
     </div>
@@ -131,7 +272,7 @@ function NoConvSelected() {
 }
 
 export default function ChatArea({ conversationId }: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -237,7 +378,7 @@ export default function ChatArea({ conversationId }: Props) {
         query,
         readyAttachments.length ? readyAttachments : undefined,
       );
-      setMessages(prev => [...prev, { role: "assistant", content: res.answer }]);
+      setMessages(prev => [...prev, { role: "assistant", content: res.answer, sources: res.sources }]);
     } catch (err) {
       setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err instanceof Error ? err.message : "Something went wrong"}` }]);
     } finally {

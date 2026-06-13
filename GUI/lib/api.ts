@@ -158,11 +158,21 @@ export const conversations = {
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 export interface Message { role: "user" | "assistant" | "system"; content: string }
+
+// A single cited source returned alongside the answer.
+// `index` corresponds to the bracketed marker (e.g. "2" for "[2]") that
+// appears inline in `answer`.
+export interface CitedSource {
+  index: string;
+  reason: string;
+  document_id: string;
+  starting_page: number;
+  end_page: number;
+}
+
 export interface ChatResponse {
   answer: string;
-  prompt: string;
-  prompt_tokens?: number;
-  completion_tokens?: number;
+  sources: CitedSource[];
 }
 
 export const chat = {
