@@ -12,6 +12,8 @@ export default function ChatPage() {
   const router = useRouter();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ courseId: string; courseName: string } | null>(null);
+  // Bump this number every time a conversation is created — Sidebar watches it to refresh
+  const [refreshSignal, setRefreshSignal] = useState(0);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -31,6 +33,8 @@ export default function ChatPage() {
   const handleConvCreated = (conv: Conversation) => {
     setActiveConvId(conv.id);
     setModal(null);
+    // Signal the sidebar to re-fetch its conversation lists
+    setRefreshSignal(prev => prev + 1);
   };
 
   return (
@@ -39,6 +43,7 @@ export default function ChatPage() {
         activeConvId={activeConvId}
         onSelectConv={setActiveConvId}
         onNewConv={(courseId, courseName) => setModal({ courseId, courseName })}
+        refreshSignal={refreshSignal}
       />
       <ChatArea conversationId={activeConvId} />
 

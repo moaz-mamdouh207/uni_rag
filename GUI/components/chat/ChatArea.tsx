@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { Send, Bot, User, Sparkles, BookOpen, Paperclip, X, FileText, Image as ImageIcon, File } from "lucide-react";
-import { chat, conversations, documents } from "@/lib/api";
+import { chat, conversations, documents, courses } from "@/lib/api";
 import type { Message, Conversation, Attachment, CitedSource } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
@@ -9,7 +9,6 @@ import rehypeKatex from "rehype-katex";
 
 interface Props {
   conversationId: string | null;
-  onConversationCreated?: (conv: Conversation) => void;
 }
 
 interface AttachedFile {
@@ -57,7 +56,7 @@ function AttachmentPill({ af, onRemove }: { af: AttachedFile; onRemove: () => vo
 
 // Renders a single [n] citation marker with a hover tooltip showing the
 // agent's reason for the citation plus the source document and page range.
-function CitationMarker({ source, label }: { source?: CitedSource; label: string }) {
+function CitationMarker({ source, label, docNames }: { source?: CitedSource; label: string; docNames: Record<string, string> }) {
   const [hovered, setHovered] = useState(false);
 
   if (!source) {
@@ -68,6 +67,8 @@ function CitationMarker({ source, label }: { source?: CitedSource; label: string
   const pageRange = source.starting_page === source.end_page
     ? `Page ${source.starting_page}`
     : `Pages ${source.starting_page}–${source.end_page}`;
+
+  const docLabel = docNames[source.document_id] || `${source.document_id.slice(0, 8)}…`;
 
   return (
     <span
@@ -128,7 +129,7 @@ function CitationMarker({ source, label }: { source?: CitedSource; label: string
               paddingTop: "0.35rem",
             }}
           >
-            Document {source.document_id.slice(0, 8)}… · {pageRange}
+          {docLabel} · {pageRange}
           </span>
         </span>
       )}
@@ -138,7 +139,7 @@ function CitationMarker({ source, label }: { source?: CitedSource; label: string
 
 // Splits message content on [n] markers and interleaves rendered markdown
 // segments with CitationMarker components.
-function renderMessageContent(content: string, sources?: CitedSource[]) {
+function renderMessageContent(content: string, sources: CitedSource[] | undefined, docNames: Record<string, string>) {
   const sourceMap = new Map<string, CitedSource>();
   (sources || []).forEach(s => sourceMap.set(s.index.replace(/[[\]]/g, ""), s));
 
@@ -172,7 +173,7 @@ function renderMessageContent(content: string, sources?: CitedSource[]) {
       {parts.map((p, i) => {
         if (p.citation) {
           const src = sourceMap.get(p.citation);
-          return <CitationMarker key={i} source={src} label={p.citation} />;
+          return <CitationMarker key={i} source={src} label={p.citation} docNames={docNames} />;
         }
         if (!p.text) return null;
         return (
@@ -193,7 +194,7 @@ function renderMessageContent(content: string, sources?: CitedSource[]) {
   );
 }
 
-function MessageBubble({ msg, isLast }: { msg: DisplayMessage; isLast: boolean }) {
+function MessageBubble({ msg, isLast, docNames }: { msg: DisplayMessage; isLast: boolean; docNames: Record<string, string> }) {
   const isUser = msg.role === "user";
   return (
     <div
@@ -210,7 +211,7 @@ function MessageBubble({ msg, isLast }: { msg: DisplayMessage; isLast: boolean }
         <div className="message-body" style={{ color: "var(--text)", lineHeight: 1.7, wordBreak: "break-word" }}>
           {isUser
             ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown>
-            : renderMessageContent(msg.content, msg.sources)}
+            : renderMessageContent(msg.content, msg.sources, docNames)}
         </div>
       </div>
     </div>
@@ -277,10 +278,30 @@ export default function ChatArea({ conversationId }: Props) {
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [convName, setConvName] = useState("");
+  const [docNames, setDocNames] = useState<Record<string, string>>({});
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Build a document_id -> name map (used to label citation tooltips) by
+  // reusing the same course/document endpoints the sidebar uses.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const courseList = await courses.list();
+        const lists = await Promise.all(
+          courseList.map(c => documents.list(c.id).catch(() => []))
+        );
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        lists.flat().forEach(d => { map[d.id] = d.name; });
+        setDocNames(map);
+      } catch {/* ignore */}
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const loadHistory = useCallback(async (id: string) => {
     setLoadingHistory(true);
@@ -402,7 +423,7 @@ export default function ChatArea({ conversationId }: Props) {
       <div style={{ maxWidth: 720, margin: "0 auto", width: "100%", paddingTop: "1rem" }}>
         {messages.length === 0 && !sending && <EmptyState />}
         {messages.map((msg, i) => (
-          <MessageBubble key={i} msg={msg} isLast={i === messages.length - 1} />
+          <MessageBubble key={i} msg={msg} isLast={i === messages.length - 1} docNames={docNames} />
         ))}
         {sending && <TypingIndicator />}
         <div ref={bottomRef} />
