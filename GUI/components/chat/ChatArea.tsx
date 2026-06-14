@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { Send, Bot, User, Sparkles, BookOpen, Paperclip, X, FileText, Image as ImageIcon, File } from "lucide-react";
 import { chat, conversations, documents, courses } from "@/lib/api";
-import type { Message, Conversation, Attachment, CitedSource } from "@/lib/api";
+import type { Message, Conversation, Attachment, CitedSource, PageImageItem, Document } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -56,8 +56,36 @@ function AttachmentPill({ af, onRemove }: { af: AttachedFile; onRemove: () => vo
 
 // Renders a single [n] citation marker with a hover tooltip showing the
 // agent's reason for the citation plus the source document and page range.
-function CitationMarker({ source, label, docNames }: { source?: CitedSource; label: string; docNames: Record<string, string> }) {
+function CitationMarker({
+  source, label, docNames, docCourses,
+}: {
+  source?: CitedSource;
+  label: string;
+  docNames: Record<string, string>;
+  docCourses: Record<string, string>;
+}) {
   const [hovered, setHovered] = useState(false);
+  const [pages, setPages] = useState<PageImageItem[] | null>(null);
+  const [loadingPages, setLoadingPages] = useState(false);
+  const [pagesError, setPagesError] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState(0);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHide = () => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  };
+
+  const scheduleHide = () => {
+    cancelHide();
+    hideTimerRef.current = setTimeout(() => setHovered(false), 400);
+  };
+
+  useEffect(() => {
+    return () => cancelHide();
+  }, []);
 
   if (!source) {
     // No matching source for this index — render as plain text.
@@ -69,12 +97,41 @@ function CitationMarker({ source, label, docNames }: { source?: CitedSource; lab
     : `Pages ${source.starting_page}–${source.end_page}`;
 
   const docLabel = docNames[source.document_id] || `${source.document_id.slice(0, 8)}…`;
+  const courseId = docCourses[source.document_id];
+
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const handleViewPages = async () => {
+    if (pages) {
+      setModalOpen(true);
+      return;
+    }
+    if (!courseId || loadingPages) return;
+    setLoadingPages(true);
+    setPagesError(null);
+    try {
+      const res = await documents.getPages(courseId, source.document_id, source.starting_page, source.end_page);
+      setPages(res.pages);
+      setActivePage(0);
+      setModalOpen(true);
+    } catch (err) {
+      setPagesError(err instanceof Error ? err.message : "Failed to load pages");
+    } finally {
+      setLoadingPages(false);
+    }
+  };
+
+  const closePages = () => {
+    setModalOpen(false);
+  };
+
+  const showingPages = modalOpen && pages && pages.length > 0;
 
   return (
     <span
       style={{ position: "relative", display: "inline-block" }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseEnter={() => { cancelHide(); setHovered(true); }}
+      onMouseLeave={scheduleHide}
     >
       <sup
         style={{
@@ -96,40 +153,218 @@ function CitationMarker({ source, label, docNames }: { source?: CitedSource; lab
       </sup>
       {hovered && (
         <span
+          onMouseEnter={cancelHide}
+          onMouseLeave={scheduleHide}
           style={{
             position: "absolute",
-            bottom: "calc(100% + 6px)",
+            bottom: "100%",
             left: "50%",
             transform: "translateX(-50%)",
-            width: 240,
-            maxWidth: "80vw",
+            width: 300,
+            maxWidth: "92vw",
+            maxHeight: 420,
+            overflowY: "auto",
             background: "var(--surface)",
             border: "1px solid var(--border-2)",
-            borderRadius: 9,
+            borderRadius: 10,
             boxShadow: "0 6px 20px rgba(0, 0, 0, 0.18)",
-            padding: "0.6rem 0.7rem",
+            padding: "0.8rem 0.9rem 0.9rem",
+            marginBottom: 6,
             zIndex: 50,
-            fontSize: "0.78rem",
-            lineHeight: 1.5,
+            fontSize: "0.95rem",
+            lineHeight: 1.6,
             whiteSpace: "normal",
             textAlign: "left",
           }}
         >
-          <span style={{ display: "block", color: "var(--text)", marginBottom: "0.4rem" }}>
+          {/* Reason stays visible at all times */}
+          <span style={{ display: "block", color: "var(--text)", marginBottom: "0.5rem" }}>
             {source.reason}
           </span>
+
           <span
             style={{
-              display: "block",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.5rem",
               color: "var(--text-3)",
-              fontSize: "0.7rem",
+              fontSize: "0.82rem",
               fontWeight: 600,
-              letterSpacing: "0.03em",
+              letterSpacing: "0.02em",
               borderTop: "1px solid var(--border)",
-              paddingTop: "0.35rem",
+              paddingTop: "0.4rem",
+              marginBottom: loadingPages || pagesError ? "0.6rem" : 0,
             }}
           >
-          {docLabel} · {pageRange}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {docLabel} · {pageRange}
+            </span>
+            <button
+              onClick={handleViewPages}
+              disabled={loadingPages || !courseId}
+              style={{
+                flexShrink: 0,
+                fontSize: "0.82rem",
+                fontWeight: 600,
+                color: "#fff",
+                background: "var(--accent)",
+                border: "none",
+                borderRadius: 6,
+                padding: "0.35rem 0.7rem",
+                cursor: loadingPages || !courseId ? "not-allowed" : "pointer",
+                opacity: loadingPages || !courseId ? 0.6 : 1,
+              }}
+            >
+              {loadingPages ? "Loading…" : pages ? "View pages" : "View pages"}
+            </button>
+          </span>
+
+          {pagesError && (
+            <span style={{ display: "block", color: "var(--danger)", fontSize: "0.85rem" }}>
+              {pagesError}
+            </span>
+          )}
+        </span>
+      )}
+
+      {showingPages && pages && (
+        <span
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "2rem",
+          }}
+          onClick={closePages}
+        >
+          <span
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: "relative",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              width: "min(900px, 92vw)",
+              maxHeight: "92vh",
+              background: "var(--surface)",
+              border: "1px solid var(--border-2)",
+              borderRadius: 12,
+              boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+              padding: "1.25rem",
+              fontSize: "0.95rem",
+              lineHeight: 1.6,
+            }}
+          >
+            {/* Close button */}
+            <button
+              onClick={closePages}
+              title="Close"
+              style={{
+                position: "absolute",
+                top: 10,
+                right: 10,
+                zIndex: 2,
+                width: 32,
+                height: 32,
+                borderRadius: "50%",
+                border: "none",
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                fontSize: "1.1rem",
+                lineHeight: 1,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              ×
+            </button>
+
+            <span style={{ display: "block", fontSize: "0.85rem", color: "var(--text-3)", marginBottom: "0.5rem" }}>
+              {docLabel} · Page {pages[activePage].page_number}
+            </span>
+
+            {/* Image stage with prev/next arrows */}
+            <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.75rem", width: "100%", flex: 1, minHeight: 0 }}>
+              <button
+                onClick={() => setActivePage(p => Math.max(0, p - 1))}
+                disabled={activePage === 0}
+                style={{
+                  flexShrink: 0,
+                  width: 40,
+                  height: 40,
+                  borderRadius: "50%",
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-2)",
+                  color: "var(--text)",
+                  fontSize: "1.3rem",
+                  cursor: activePage === 0 ? "not-allowed" : "pointer",
+                  opacity: activePage === 0 ? 0.4 : 1,
+                }}
+              >
+                ‹
+              </button>
+
+              <span style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflow: "hidden" }}>
+                <img
+                  src={`data:image/png;base64,${pages[activePage].image}`}
+                  alt={`Page ${pages[activePage].page_number}`}
+                  style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                />
+              </span>
+
+              <button
+                onClick={() => setActivePage(p => Math.min(pages!.length - 1, p + 1))}
+                disabled={activePage === pages.length - 1}
+                style={{
+                  flexShrink: 0,
+                  width: 40,
+                  height: 40,
+                  borderRadius: "50%",
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-2)",
+                  color: "var(--text)",
+                  fontSize: "1.3rem",
+                  cursor: activePage === pages.length - 1 ? "not-allowed" : "pointer",
+                  opacity: activePage === pages.length - 1 ? 0.4 : 1,
+                }}
+              >
+                ›
+              </button>
+            </span>
+
+            {/* Reason — kept at the bottom, above the dots */}
+            <span style={{ display: "block", color: "var(--text)", textAlign: "center", marginTop: "1rem", padding: "0 1rem" }}>
+              {source.reason}
+            </span>
+
+            {/* Dot indicators */}
+            {pages.length > 1 && (
+              <span style={{ display: "flex", justifyContent: "center", gap: "0.4rem", marginTop: "0.75rem" }}>
+                {pages.map((p, idx) => (
+                  <button
+                    key={p.page_number}
+                    onClick={() => setActivePage(idx)}
+                    title={`Page ${p.page_number}`}
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: "50%",
+                      border: "none",
+                      padding: 0,
+                      cursor: "pointer",
+                      background: idx === activePage ? "var(--text)" : "var(--border-2)",
+                    }}
+                  />
+                ))}
+              </span>
+            )}
           </span>
         </span>
       )}
@@ -139,7 +374,7 @@ function CitationMarker({ source, label, docNames }: { source?: CitedSource; lab
 
 // Splits message content on [n] markers and interleaves rendered markdown
 // segments with CitationMarker components.
-function renderMessageContent(content: string, sources: CitedSource[] | undefined, docNames: Record<string, string>) {
+function renderMessageContent(content: string, sources: CitedSource[] | undefined, docNames: Record<string, string>, docCourses: Record<string, string>) {
   const sourceMap = new Map<string, CitedSource>();
   (sources || []).forEach(s => sourceMap.set(s.index.replace(/[[\]]/g, ""), s));
 
@@ -173,7 +408,7 @@ function renderMessageContent(content: string, sources: CitedSource[] | undefine
       {parts.map((p, i) => {
         if (p.citation) {
           const src = sourceMap.get(p.citation);
-          return <CitationMarker key={i} source={src} label={p.citation} docNames={docNames} />;
+          return <CitationMarker key={i} source={src} label={p.citation} docNames={docNames} docCourses={docCourses} />;
         }
         if (!p.text) return null;
         return (
@@ -194,7 +429,7 @@ function renderMessageContent(content: string, sources: CitedSource[] | undefine
   );
 }
 
-function MessageBubble({ msg, isLast, docNames }: { msg: DisplayMessage; isLast: boolean; docNames: Record<string, string> }) {
+function MessageBubble({ msg, isLast, docNames, docCourses }: { msg: DisplayMessage; isLast: boolean; docNames: Record<string, string>; docCourses: Record<string, string> }) {
   const isUser = msg.role === "user";
   return (
     <div
@@ -211,7 +446,7 @@ function MessageBubble({ msg, isLast, docNames }: { msg: DisplayMessage; isLast:
         <div className="message-body" style={{ color: "var(--text)", lineHeight: 1.7, wordBreak: "break-word" }}>
           {isUser
             ? <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown>
-            : renderMessageContent(msg.content, msg.sources, docNames)}
+            : renderMessageContent(msg.content, msg.sources, docNames, docCourses)}
         </div>
       </div>
     </div>
@@ -279,6 +514,7 @@ export default function ChatArea({ conversationId }: Props) {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [convName, setConvName] = useState("");
   const [docNames, setDocNames] = useState<Record<string, string>>({});
+  const [docCourses, setDocCourses] = useState<Record<string, string>>({});
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -292,12 +528,16 @@ export default function ChatArea({ conversationId }: Props) {
       try {
         const courseList = await courses.list();
         const lists = await Promise.all(
-          courseList.map(c => documents.list(c.id).catch(() => []))
+          courseList.map(c => documents.list(c.id).then(docs => ({ courseId: c.id, docs })).catch(() => ({ courseId: c.id, docs: [] as Document[] })))
         );
         if (cancelled) return;
-        const map: Record<string, string> = {};
-        lists.flat().forEach(d => { map[d.id] = d.name; });
-        setDocNames(map);
+        const nameMap: Record<string, string> = {};
+        const courseMap: Record<string, string> = {};
+        lists.forEach(({ courseId, docs }) => {
+          docs.forEach(d => { nameMap[d.id] = d.name; courseMap[d.id] = courseId; });
+        });
+        setDocNames(nameMap);
+        setDocCourses(courseMap);
       } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
@@ -423,7 +663,7 @@ export default function ChatArea({ conversationId }: Props) {
       <div style={{ maxWidth: 720, margin: "0 auto", width: "100%", paddingTop: "1rem" }}>
         {messages.length === 0 && !sending && <EmptyState />}
         {messages.map((msg, i) => (
-          <MessageBubble key={i} msg={msg} isLast={i === messages.length - 1} docNames={docNames} />
+          <MessageBubble key={i} msg={msg} isLast={i === messages.length - 1} docNames={docNames} docCourses={docCourses} />
         ))}
         {sending && <TypingIndicator />}
         <div ref={bottomRef} />

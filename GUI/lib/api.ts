@@ -74,9 +74,28 @@ export interface Attachment {
   type: AttachmentType;
 }
 
+export interface PageImageItem {
+  page_number: number;
+  image: string; // base64-encoded PNG
+}
+
+export interface PageImagesResponse {
+  pages: PageImageItem[];
+}
+
 export const documents = {
   list: (courseId: string) =>
     request<Document[]>(`/knowledge/courses/${courseId}/documents`),
+
+  /**
+   * POST /knowledge/courses/{courseId}/documents/{documentId}/pages
+   * Returns rendered page images (base64 PNG) for the given page range.
+   */
+  getPages: (courseId: string, documentId: string, startPage: number, endPage: number) =>
+    request<PageImagesResponse>(`/knowledge/courses/${courseId}/documents/${documentId}/pages`, {
+      method: "POST",
+      body: JSON.stringify({ start_page: startPage, end_page: endPage }),
+    }),
 
   upload: async (courseId: string, files: File[]): Promise<UploadTaskInfo[]> => {
     const token = getToken();
