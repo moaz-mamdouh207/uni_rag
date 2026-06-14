@@ -93,6 +93,8 @@ class QdrantSyncProvider(SyncVectorDBRepository):
                 document_id=record.payload.get("document_id"), # type: ignore
                 index=record.payload.get("index"), # type: ignore
                 chunk_id=str(record.id),
+                starting_page=record.payload.get("starting_page"),# type: ignore
+                end_page=record.payload.get("end_page"),# type: ignore
             )
             for record in records
         ]
@@ -191,6 +193,8 @@ class QdrantAsyncProvider(AsyncVectorDBRepository):
                     document_id=payload["document_id"],
                     index=payload["index"],
                     chunk_id=str(point.id),
+                    starting_page=payload.get("starting_page"),# type: ignore
+                    end_page=payload.get("end_page"),# type: ignore
                 )
             )
 

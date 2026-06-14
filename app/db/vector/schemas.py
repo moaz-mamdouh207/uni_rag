@@ -34,3 +34,5 @@ class SearchResult(BaseModel):
     document_id: str
     index: int
     chunk_id: str
+    starting_page: int
+    end_page: int

@@ -17,138 +17,15 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 
 from modules.chat.agent.prompts import ENGINEERING_AGENT_SYSTEM_PROMPT
-from modules.chat.agent.tools import AgentTools
 from modules.chat.schemas import CitedSource
 from shared.tracing import observe, observe_generation, set_trace_attributes
 from db.relational.constants import MessageRole
-
+from modules.chat.agent.tools.finish import FinishTool
 if TYPE_CHECKING:
-    pass
+    from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# LangChain tool stubs
-# ---------------------------------------------------------------------------
-
-from langchain_core.tools import tool as lc_tool
-
-
-@lc_tool
-def retrieve(query: str, chunk_type: str | None = None, context_hint: str | None = None) -> str:
-    """
-    Search the course knowledge base for a single concept, formula, or principle.
-
-    chunk_type: REQUIRED for targeted retrieval.
-      - "theory"          → definitions, formulas, conceptual background
-      - "solved_question" → worked examples from the reference book
-
-    context_hint: the specific engineering sub-field, e.g. 'beam bending',
-    'Bernoulli equation', 'Mohr circle stress'. Always provide it.
-
-    Results include a chunk_id field — copy it exactly into your %%CITATIONS%%
-    block when you cite that chunk in your answer.
-
-    # execution: AgentTools._retrieve
-    """
-    ...
-
-
-@lc_tool
-def retrieve_multi(queries: list[dict]) -> str:
-    """
-    Search the knowledge base for multiple independent concepts in parallel.
-
-    Each query object accepts:
-      - "query"        (required)
-      - "chunk_type"   (required: "theory" or "solved_question")
-      - "context_hint" (recommended)
-
-    For every engineering question you should issue at least two queries:
-      1. chunk_type="theory"          — to get the relevant formulas/concepts
-      2. chunk_type="solved_question" — to get a worked example of the same type
-
-    Results include a chunk_id field — copy it exactly into your %%CITATIONS%%
-    block when you cite that chunk in your answer. Your [N] numbers are assigned
-    by you in order of first appearance in the answer, not from the result index.
-
-    # execution: AgentTools._retrieve_multi
-    """
-    ...
-
-
-@lc_tool
-def calculate(expression: str) -> str:
-    """
-    Evaluate a mathematical expression with full precision using a symbolic math engine.
-    Supports arithmetic, algebra, trigonometry, logarithms, square roots, and equation solving.
-
-    Single expression:       (15 * 6**2) / 8
-    Square root:             sqrt(144)
-    Trig:                    sin(pi/4)
-    Solve equation:          solve(x**2 - 4, x)
-    Multi-step (semicolons): z = 1/sqrt(2); w = z * 3; [z, w]
-
-    Always use ** for exponentiation, not ^.
-    Always call this for any numerical computation — never compute in your head.
-    # execution: AgentTools._calculate
-    """
-    ...
-
-
-@lc_tool
-def clarify_question(original_text: str, interpretation: str) -> str:
-    """
-    Record your interpretation of an ambiguous question or one that depends on
-    a previous part (e.g. 'using the result from part a', 'hence show that').
-    Call this BEFORE retrieving or calculating for that question.
-    original_text: the ambiguous question text verbatim.
-    interpretation: your interpretation including any dependency assumptions.
-    # execution: AgentTools._clarify_question
-    """
-    ...
-
-
-@lc_tool
-def finish(answer: str) -> str:
-    """
-    Deliver the final answer to the user and end the loop.
-    Call this only when you have retrieved all necessary context and completed
-    all calculations.
-
-    CITATION FORMAT (mandatory):
-    1. Inline: every time you use a retrieved chunk, write [N] at the end of
-       the sentence, where N is the `index` field from that chunk's result.
-       Example: "Applying Ohm's law to the circuit gives V = IR [3]."
-
-    2. Citation block: append this block at the very end of your answer,
-       listing only the chunks you actually cited inline:
-
-       %%CITATIONS%%
-       [1] citation_id=<citation_id> type=<theory|solved_question>
-       [2] citation_id=<citation_id> type=<theory|solved_question>
-       %%END_CITATIONS%%
-
-    Rules:
-    - Only cite theory chunks you directly used for a formula or concept.
-    - Only cite solved_question chunks whose worked example is structurally
-      similar to the question being solved (same problem type, same unknowns).
-    - Never list a chunk in %%CITATIONS%% that you did not reference inline.
-    - The %%CITATIONS%% block must be the absolute last thing in the answer.
-
-    RESPONSE STYLE:
-    - Each equation gets its own line with blank lines before and after.
-    - Each step opens with one sentence of intent, then shows the math.
-    - Numerical results are always on their own line: "Result: ζ = 0.303"
-    - Use bold for final answers: **ζ = 0.303**
-    - Never write "substituting x=1 into F=ma we get F=1" — break it into three lines.
-    # execution: terminates loop, answer returned to user
-    """
-    ...
-
-
-ALL_LC_TOOLS = [retrieve, retrieve_multi, calculate, clarify_question, finish]
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +46,12 @@ class AgentLoopResult(BaseModel):
 class AgentLoop:
     def __init__(
         self,
-        llm:            ChatGoogleGenerativeAI,
-        tools:          AgentTools,
+        llm: ChatGoogleGenerativeAI,
+        tools: list[BaseTool],
         max_iterations: int = 10,
     ) -> None:
-        self._llm_with_tools = llm.bind_tools(ALL_LC_TOOLS)
-        self._tools          = tools
+        self._tools = tools
+        self._llm_with_tools = llm.bind_tools(tools)
         self._max_iterations = max_iterations
 
     # ------------------------------------------------------------------
@@ -185,7 +62,7 @@ class AgentLoop:
         self,
         user_query:      str,
         attachment_contents: list[str] | None = None,
-        history:         list = [],
+        history: list | None = None,
         trace_metadata:  dict | None = None,
     ) -> AgentLoopResult:
         history = self._orm_history_to_lc(history)
@@ -218,7 +95,6 @@ class AgentLoop:
 
             while iterations < self._max_iterations:
                 iterations += 1
-                logger.debug("AgentLoop: iteration %d / %d", iterations, self._max_iterations)
 
                 with observe_generation(
                     name=f"llm_call_iter_{iterations}",
@@ -243,7 +119,7 @@ class AgentLoop:
                         output={
                             "tool_calls_requested": requested_tools,
                             "tool_calls_count":     len(requested_tools),
-                            "has_finish":           AgentTools.FINISH in requested_tools,
+                            "has_finish":           "finish" in requested_tools,
                             "text_content": (
                                 response.content[:300]
                                 if isinstance(response.content, str) and response.content.strip()
@@ -267,17 +143,15 @@ class AgentLoop:
 
                 # ── No tool calls ─────────────────────────────────────────
                 if not response.tool_calls:
-                    logger.warning(
-                        "AgentLoop: LLM responded without tool calls at iteration %d", iterations
-                    )
                     text = response.content if isinstance(response.content, str) else ""
-                    clean_answer, cited = self._tools.parse_answer_and_citations(
-                        text or "I was unable to produce an answer."
+                    logger.warning(
+                        "AgentLoop: LLM responded without tool calls at iteration %d, text %s", iterations, text
                     )
+                    
                     result = AgentLoopResult(
-                        answer=clean_answer,
+                        answer="I was unable to produce an answer.",
                         iterations=iterations,
-                        cited_sources=cited,
+                        cited_sources=[],
                     )
                     turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "no_tool_calls"))
                     return result
@@ -287,7 +161,7 @@ class AgentLoop:
                 if finish_call:
                     other_calls = [
                         tc for tc in response.tool_calls  # type: ignore
-                        if tc.get("name") != AgentTools.FINISH
+                        if tc.get("name") != "finish"
                     ]
                     if other_calls:
                         logger.warning(
@@ -295,18 +169,12 @@ class AgentLoop:
                             "at iteration %d — the other calls will be dropped.",
                             len(other_calls), iterations,
                         )
-
-                    raw_answer = finish_call.get("args", {}).get("answer", "")
-                    clean_answer, cited = self._tools.parse_answer_and_citations(raw_answer)
-
-                    logger.debug(
-                        "AgentLoop: finish() called after %d iterations, %d citations",
-                        iterations, len(cited),
-                    )
+                    finish_tool = next((t for t in self._tools if t.name == "finish"), None)
+                    answer, citations = await finish_tool.arun(finish_call["args"]) # type: ignore
                     result = AgentLoopResult(
-                        answer=clean_answer,
+                        answer=answer,
                         iterations=iterations,
-                        cited_sources=cited,
+                        cited_sources=citations,
                     )
                     turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "finish"))
                     return result
@@ -318,12 +186,11 @@ class AgentLoop:
             # ── Hit iteration cap ─────────────────────────────────────────
             logger.warning("AgentLoop: hit max_iterations (%d) without finish()", self._max_iterations)
             partial = self._extract_partial_answer(messages)
-            clean_answer, cited = self._tools.parse_answer_and_citations(partial)
             result = AgentLoopResult(
-                answer=clean_answer,
+                answer=partial,
                 iterations=iterations,
                 hit_limit=True,
-                cited_sources=cited,
+                cited_sources=[],
             )
             turn_span.update(**self._turn_output(result, tool_call_counts, turn_start, "hit_limit"))
             return result
@@ -398,11 +265,15 @@ class AgentLoop:
             tool_name   = tc["name"]
             tool_args   = tc.get("args", {})
             tool_id     = tc.get("id", tool_name)
-            result_json = await self._tools.execute(tool_name, tool_args)
+
+            tool = next((t for t in self._tools if t.name == tool_name), None)
+            result_json = await tool.arun(tool_args)  # type: ignore
+
             logger.debug(
                 "AgentLoop: tool=%s id=%s result_len=%d",
                 tool_name, tool_id, len(result_json),
             )
+            
             return ToolMessage(content=result_json, tool_call_id=tool_id, name=tool_name)
 
         results = await asyncio.gather(
@@ -432,7 +303,7 @@ class AgentLoop:
     @staticmethod
     def _find_finish_call(tool_calls: list[dict[str, Any]]) -> dict | None:
         for tc in tool_calls:
-            if tc.get("name") == AgentTools.FINISH:
+            if tc.get("name") == "finish":
                 return tc
         return None
 
@@ -452,7 +323,10 @@ class AgentLoop:
         )
     
     @staticmethod
-    def _orm_history_to_lc(history: list) -> list[BaseMessage]:
+    def _orm_history_to_lc(history: list | None) -> list[BaseMessage]:
+        if not history:
+            return []
+        
         lc: list[BaseMessage] = []
         for msg in history:
             if msg.role == MessageRole.user:

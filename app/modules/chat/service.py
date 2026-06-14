@@ -11,8 +11,6 @@ from db.relational.constants import MessageRole
 from modules.chat.schemas import (
     ChatRequest,
     ChatResponse,
-    CitedSource,
-    ConversationHistory,
     ConversationMetadata,
     MessageMetadata,
 )
@@ -23,6 +21,8 @@ from modules.chat.utils.asset import save_attachment
 
 from modules.chat.schemas import Attachment
 
+from modules.chat.schemas import CitedSource
+
 if TYPE_CHECKING:
     from modules.chat.config import ChatSettings
     from db.relational.repositories.conversation_repository import AsyncConversationRepository
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from db.relational.schemas import ConversationUpdate
     from modules.chat.dependencies import ValidatedAttachment
     from modules.chat.attachment_processor import AttachmentProcessor
+    
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class ChatService:
                     ]
                 })
 
-        answer, sources, prompt_tokens, completion_tokens = await self._run_agent(
+        answer, sources = await self._run_agent(
             request=request,
             conv=conv,
             history=trimmed_history,
@@ -134,7 +135,6 @@ class ChatService:
             data=MessageCreate(
                 role=MessageRole.user,
                 content=request.query,
-                token_count=prompt_tokens,
             ),
             conversation_id=conv.id,
         )
@@ -142,7 +142,6 @@ class ChatService:
             data=MessageCreate(
                 role=MessageRole.assistant,
                 content=answer,
-                token_count=completion_tokens,
             ),
             conversation_id=conv.id,
         )
@@ -150,14 +149,7 @@ class ChatService:
         return ChatResponse(
             answer=answer,
             sources=sources,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
         )
-
-
-    
-
-
 
     # ------------------------------------------------------------------
     # Private
@@ -169,7 +161,7 @@ class ChatService:
         conv:            Conversation,
         history:         list,
         attachment_contents: list[str] | None = None,
-    ) -> tuple[str, list[CitedSource], int | None, int | None]:
+    ) -> tuple[str, list[CitedSource]]:
         agent_loop = self._agent_loop_factory(
             user_id=conv.user_id,
             course_id=conv.meta.course_id,
@@ -190,4 +182,4 @@ class ChatService:
         if result.hit_limit:
             logger.warning("ChatService: agent hit iteration limit for conv %s", conv.id)
 
-        return result.answer, result.cited_sources, None, None
+        return result.answer, result.cited_sources

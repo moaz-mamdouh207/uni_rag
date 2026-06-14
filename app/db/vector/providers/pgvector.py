@@ -190,6 +190,8 @@ class PgVectorSyncProvider(SyncVectorDBRepository):
                 document_id=chunk.document_id,
                 index=chunk.index,
                 chunk_id=chunk.id,
+                starting_page=chunk.starting_page,
+                end_page=chunk.end_pge
             )
             for chunk in rows
         ]
@@ -273,6 +275,8 @@ class PgVectorAsyncProvider(AsyncVectorDBRepository):
                     document_id=chunk.document_id,
                     index=chunk.index,
                     chunk_id=chunk.id,
+                    starting_page=chunk.starting_page,
+                    end_page=chunk.end_pge
                 )
             )
 

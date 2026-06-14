@@ -54,7 +54,9 @@ class Reranker:
                 score=score,
                 document_id=result.document_id,
                 index=result.index,
-                chunk_id=result.chunk_id
+                chunk_id=result.chunk_id,
+                starting_page=result.starting_page,
+                end_page=result.end_page
             )
             for result, score in zip(results, scores)
         ]

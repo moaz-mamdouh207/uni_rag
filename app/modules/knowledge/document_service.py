@@ -10,7 +10,7 @@ from shared.enums import FileType
 from db.relational.constants import DocumentStatus
 from modules.ingestion.tasks import run_ingestion_pipeline
 from db.relational.schemas import DocumentCreate
-
+from modules.knowledge.schemas import PageRangeRequest, PageImagesResponse, PageImageItem
 
 if TYPE_CHECKING:
     from db.relational.repositories.document_repository import AsyncDocumentRepository
@@ -108,3 +108,35 @@ class DocumentService:
 
     async def delete_document(self, document: Document) -> None:
         raise NotImplementedError() #moaz: need to fire an event
+    
+    
+    def render_page_range(
+        self,
+        document: Document,
+        start_page: int,
+        end_page: int
+    ) -> PageImagesResponse:
+        import fitz
+        import base64
+
+        path = document.file_path
+
+        pdf = fitz.open(path)
+        total_pages = pdf.page_count
+
+        if start_page > total_pages or end_page > total_pages:
+            raise ValueError(f"Page range exceeds document length ({total_pages} pages)")
+        if end_page < start_page:
+            raise ValueError("end_page must be greater than or equal to start_page")
+
+        items = []
+        for page_num in range(start_page, end_page + 1):
+            page = pdf[page_num - 1]  # convert to 0-indexed
+            pixmap = page.get_pixmap(dpi=150)
+            image_bytes = pixmap.tobytes("png")
+            encoded = base64.b64encode(image_bytes).decode("utf-8")
+            items.append(PageImageItem(page_number=page_num, image=encoded))
+
+        pdf.close()
+
+        return PageImagesResponse(pages=items)

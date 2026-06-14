@@ -14,7 +14,14 @@ from shared.constants import ErrorMessages
 
 from modules.chat.service import ChatService
 from modules.chat.agent.loop import AgentLoop
-from modules.chat.agent.tools import AgentTools
+
+from modules.chat.agent.tools import (
+    RetrieveTool,
+    ClarifyQuestionTool,
+    CalculateTool,
+    FinishTool
+)
+
 from modules.chat.attachment_processor import AttachmentProcessor
 
 from db.relational.session import get_async_db
@@ -28,13 +35,15 @@ from db.relational.repositories.message_repository import AsyncMessageRepository
 from modules.chat.conversation_manager import ConversationManager
 from modules.chat.enums import ALLOWED_ATTACHEMENTS, AttachmentType
 
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from modules.retrieval.service import RetrievalService
     from shared.llm.client import LLMClient
     from db.relational.models.user import User
     from db.relational.models.conversation import Conversation
-
+    from modules.chat.schemas import CitationMetaData
+    
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -103,6 +112,7 @@ async def validate_attachments(files: list[UploadFile]) -> list[ValidatedAttachm
 
     return validated_attachments
 
+from modules.chat.utils.temp import AgentState
 
 
 def get_chat_service(
@@ -116,13 +126,20 @@ def get_chat_service(
         course_id:     UUID,
         documents_ids: list[UUID] | None = None,
     ) -> AgentLoop:
-        tools = AgentTools(
-            retrieval_service=retrieval_service,
-            settings=settings.chat,
-            user_id=user_id,
-            course_id=course_id,
-            documents_ids=documents_ids,
-        )
+        state = AgentState()
+        tools = [
+            RetrieveTool(
+                retrieval_service=retrieval_service,
+                state=state,
+                settings=settings.chat,
+                user_id=user_id,
+                course_id=course_id,
+                documents_ids=documents_ids,
+            ),
+            ClarifyQuestionTool(),
+            CalculateTool(),
+            FinishTool(state=state)
+        ]
         return AgentLoop(
             llm=llm_client.get_llm(),
             tools=tools,

@@ -10,7 +10,7 @@ class ChatSettings(BaseModel):
 
     # --- agentic pipeline ---
     max_agent_iterations: int = Field(
-        default=10,
+        default=20,
         ge=1,
         le=25,
         description=(

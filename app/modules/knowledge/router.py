@@ -167,3 +167,21 @@ async def delete_document(
     await document_service.delete_document(
         document=document
     )
+
+from modules.knowledge.schemas import PageRangeRequest, PageImagesResponse
+@knowledge_router.post(
+    "/courses/{course_id}/documents/{document_id}/pages",
+    summary="render a page range of a document as base64 images",
+    response_model=PageImagesResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_document_pages(
+    data: PageRangeRequest,
+    document: Document = Depends(get_current_document),
+    document_service: DocumentService = Depends(get_document_service)
+) -> PageImagesResponse:
+    return document_service.render_page_range(
+        document=document,
+        start_page=data.start_page,
+        end_page=data.end_page
+    )
